@@ -1,0 +1,5 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <color name="mundru_window_bg_light">#FFF9F9FB</color>
+    <color name="mundru_window_bg_dark">#FF0E0E12</color>
+</resources>
