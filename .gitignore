@@ -1,0 +1,30 @@
+# Built application files (ignore build outputs except root release APK)
+**/build/
+build/
+app/build/
+
+# Exception: keep the standalone released APK in root as instructed
+!/Mundru.apk
+
+# Gradle & Kotlin build cache
+.gradle/
+.kotlin/
+
+# Local SDK and environment properties
+local.properties
+.idea/
+*.iml
+.DS_Store
+
+# Temporary review, handover docs & anticrack sandbox
+anticrack_sandbox/
+第九与第十轮修复审查报告.md
+第十二轮手感与视觉交互优化修复报告.md
+未完成清单.md
+PROJECT_HANDOVER.md
+CLAUDE.md
+
+# Standalone loose preview images in root
+adapted_ghost_preview.png
+Alipay.jpg
+wechat.png
