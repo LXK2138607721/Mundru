@@ -25,8 +25,7 @@ import kotlin.math.abs
 class SamplingEngine {
 
     companion object {
-        const val COOLDOWN_WINDOW_MS = 24 * 3600 * 1000L             // 24 小时冷却保护期
-        const val IMMEDIATE_SESSION_COOLDOWN_MS = 15 * 60 * 1000L     // 15 分钟会话级硬隔离
+        const val COOLDOWN_WINDOW_MS = 24 * 3600 * 1000L             // 24 小时严格冷却保护期
         const val TIME_CAPSULE_MIN_AGE_MS = 180L * 24 * 3600 * 1000L // 时光考古门槛：至少 180 天前 (半年) 的照片
     }
 
@@ -68,37 +67,19 @@ class SamplingEngine {
         if (candidates.isEmpty()) return emptyList()
 
         val freshPhotos = mutableListOf<PhotoItem>()
-        val coolingPhotos = mutableListOf<PhotoItem>()
 
         for (photo in candidates) {
             val lastViewed = viewHistory[photo.id] ?: 0L
             val elapsed = now - lastViewed
             if (lastViewed <= 0L || elapsed >= COOLDOWN_WINDOW_MS) {
                 freshPhotos.add(photo)
-            } else {
-                coolingPhotos.add(photo)
             }
         }
 
-        // 优先从完全无冷却的新相片中选取
-        if (freshPhotos.size >= batchSize) {
-            return freshPhotos
-        }
-
-        // 不足时，使用冷却中的相片补足，按「最久前查看」正序排列（越早看过的越优先重新出现）
-        val result = freshPhotos.toMutableList()
-        val needed = batchSize - result.size
-
-        // 过滤掉 15 分钟内刚划过的相片（即时会话绝不重复）
-        val validCooling = coolingPhotos
-            .filter { (now - (viewHistory[it.id] ?: 0L)) >= IMMEDIATE_SESSION_COOLDOWN_MS }
-            .sortedBy { viewHistory[it.id] ?: 0L }
-
-        if (validCooling.isNotEmpty()) {
-            result.addAll(validCooling.take(needed))
-        }
-
-        return result
+        // 严格 24 小时冷却硬性闭环：
+        // 彻底根除不足 batchSize 时用 15 分钟前跳过的照片强行填仓的漏洞。
+        // 未审阅照片不足时优雅降级返回实际剩余张数（甚至空列表），绝不循环拉回当天刚刚跳过的照片。
+        return freshPhotos
     }
 
     /**

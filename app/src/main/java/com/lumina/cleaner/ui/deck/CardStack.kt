@@ -77,8 +77,8 @@ fun CardStack(
     // 隐藏基准距离：当 translationX 为该值时，上一张卡片的右边缘刚好紧贴屏幕左边缘 (x = 0)
     val hiddenBaseOffset = -(cardWidthPx + padPx)
 
-    val horizontalThreshold = screenWidthPx * 0.16f
-    val verticalThreshold = screenHeightPx * 0.12f
+    val horizontalThreshold = screenWidthPx * 0.13f
+    val verticalThreshold = screenHeightPx * 0.065f
 
     val prevPhoto = if (currentIndex > 0) photos.getOrNull(currentIndex - 1) else null
     val currentPhoto = photos[currentIndex]
@@ -146,9 +146,9 @@ fun CardStack(
                                 val vx = velocity.x
                                 val vy = velocity.y
 
-                                val isFastUp = vy < -600f && dy < -30f
-                                val isFastRight = vx > 600f && dx > 30f
-                                val isFastLeft = vx < -600f && dx < -30f
+                                val isFastUp = vy < -350f && dy < -18f
+                                val isFastRight = vx > 450f && dx > 25f
+                                val isFastLeft = vx < -450f && dx < -25f
 
                                 val commitSpring = spring<Float>(
                                     dampingRatio = 0.86f,
@@ -184,8 +184,8 @@ fun CardStack(
                                         animOffsetX.animateTo(-screenWidthPx * 1.5f, commitSpring)
                                         onSwipeLeft(currentPhoto)
                                     }
-                                    // 上滑：移入回收站
-                                    (dy < -verticalThreshold || isFastUp) && abs(dy) > abs(dx) -> {
+                                    // 上滑：移入回收站（包容单手斜推生理角度）
+                                    (dy < -verticalThreshold || isFastUp) && abs(dy) >= abs(dx) * 0.65f -> {
                                         isCommittingSwipe = true
                                         HapticFeedback.heavy(context)
                                         animOffsetY.animateTo(-screenHeightPx, commitSpring)
@@ -235,7 +235,7 @@ fun CardStack(
 
                                 val reachedThreshold = (newX > horizontalThreshold && currentIndex > 0) ||
                                         (newX < -horizontalThreshold) ||
-                                        (newY < -verticalThreshold && abs(newY) > abs(newX))
+                                        (newY < -verticalThreshold && abs(newY) >= abs(newX) * 0.65f)
                                 if (reachedThreshold && !hasTriggeredThresholdHaptic) {
                                     hasTriggeredThresholdHaptic = true
                                     HapticFeedback.tick(context)

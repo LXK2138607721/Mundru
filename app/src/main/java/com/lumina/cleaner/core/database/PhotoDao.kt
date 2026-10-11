@@ -82,6 +82,24 @@ interface PhotoDao {
     suspend fun restoreFromTrash(photoId: Long)
 
     /**
+     * 批量恢复相片（从回收站移除暂存）
+     */
+    @Query("DELETE FROM local_trash WHERE photoId IN (:photoIds)")
+    suspend fun restoreFromTrashBatch(photoIds: List<Long>)
+
+    /**
+     * 批量标记相片已被审阅（重置 24h 冷却保护时间戳）
+     */
+    @Query("UPDATE photos SET viewCount = viewCount + 1, lastViewedAt = :viewedAt WHERE id IN (:ids)")
+    suspend fun markViewedBatch(ids: List<Long>, viewedAt: Long)
+
+    /**
+     * 根据 PhotoId 查询单张相片元数据
+     */
+    @Query("SELECT * FROM photos WHERE id = :id LIMIT 1")
+    suspend fun getPhotoById(id: Long): PhotoEntity?
+
+    /**
      * 物理删除成功后根据 PhotoId 集合从回收站彻底清除
      */
     @Query("DELETE FROM local_trash WHERE photoId IN (:photoIds)")

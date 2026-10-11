@@ -106,6 +106,7 @@ import com.lumina.cleaner.ui.theme.AppThemeMode
 import androidx.compose.ui.res.painterResource
 import com.lumina.cleaner.R
 import com.lumina.cleaner.ui.trash.RecycleBinScreen
+import com.lumina.cleaner.core.database.toPhotoItem
 import com.lumina.cleaner.ui.viewer.PhotoViewerOverlay
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
@@ -356,35 +357,85 @@ class MainActivity : ComponentActivity() {
     }
 
     /**
-     * 调用系统 Scoped Storage 批量删除
+     * 校验 URI 在当前设备 MediaStore 中是否依然真实存在（外部失效探活）
+     */
+    private fun checkUriExists(uri: Uri): Boolean {
+        return try {
+            contentResolver.query(uri, arrayOf(MediaStore.Images.Media._ID), null, null, null)?.use { cursor ->
+                cursor.moveToFirst()
+            } ?: false
+        } catch (e: Exception) {
+            false
+        }
+    }
+
+    /**
+     * 调用系统 Scoped Storage 批量删除（集成失效死图异步探活分流，杜绝全选卡死）
      */
     fun requestSystemDelete(photoIds: List<Long>, uris: List<Uri>, onComplete: () -> Unit) {
         if (uris.isEmpty()) return
 
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
-            try {
-                val pendingIntent = MediaStore.createDeleteRequest(contentResolver, uris)
-                pendingDeletePhotoIds = photoIds
-                pendingDeleteUris = uris
-                onDeleteCompleteCallback = onComplete
-                deletePermissionLauncher.launch(
-                    IntentSenderRequest.Builder(pendingIntent.intentSender).build()
-                )
-            } catch (e: Exception) {
-                Toast.makeText(this, "发起删除请求失败: ${e.message}", Toast.LENGTH_SHORT).show()
-            }
-        } else {
-            // Android 10 及以下直接使用 ContentResolver 删除
-            lifecycleScopeLaunch {
-                withContext(Dispatchers.IO) {
-                    uris.forEach { contentResolver.delete(it, null, null) }
-                    if (photoIds.isNotEmpty()) {
-                        database.photoDao().deleteFromTrash(photoIds)
+        lifecycleScopeLaunch {
+            val (validPairs, orphanPairs) = withContext(Dispatchers.IO) {
+                val valid = mutableListOf<Pair<Long, Uri>>()
+                val orphan = mutableListOf<Pair<Long, Uri>>()
+                for (i in uris.indices) {
+                    val uri = uris[i]
+                    val id = photoIds.getOrElse(i) { -1L }
+                    if (checkUriExists(uri)) {
+                        valid.add(Pair(id, uri))
+                    } else {
+                        orphan.add(Pair(id, uri))
                     }
-                    val uriStrings = uris.map { it.toString() }
+                }
+                Pair(valid, orphan)
+            }
+
+            // 1. 外部失效死图自动分流：直接从本地数据库静默抹除，绝不阻塞批量物理删除
+            if (orphanPairs.isNotEmpty()) {
+                withContext(Dispatchers.IO) {
+                    val orphanIds = orphanPairs.map { it.first }.filter { it > 0 }
+                    if (orphanIds.isNotEmpty()) {
+                        database.photoDao().deleteFromTrash(orphanIds)
+                    }
+                    val orphanUriStrings = orphanPairs.map { it.second.toString() }
+                    database.photoDao().deleteFromTrashByUris(orphanUriStrings)
+                }
+            }
+
+            // 2. 若全部为失效死图，提示清理成功并直接结束
+            if (validPairs.isEmpty()) {
+                Toast.makeText(this@MainActivity, "已清理 ${orphanPairs.size} 个外部失效条目", Toast.LENGTH_SHORT).show()
+                onComplete()
+                return@lifecycleScopeLaunch
+            }
+
+            val validIds = validPairs.map { it.first }
+            val validUris = validPairs.map { it.second }
+
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
+                try {
+                    val pendingIntent = MediaStore.createDeleteRequest(contentResolver, validUris)
+                    pendingDeletePhotoIds = validIds
+                    pendingDeleteUris = validUris
+                    onDeleteCompleteCallback = onComplete
+                    deletePermissionLauncher.launch(
+                        IntentSenderRequest.Builder(pendingIntent.intentSender).build()
+                    )
+                } catch (e: Exception) {
+                    Toast.makeText(this@MainActivity, "发起删除请求失败: ${e.message}", Toast.LENGTH_SHORT).show()
+                }
+            } else {
+                // Android 10 及以下直接使用 ContentResolver 删除
+                withContext(Dispatchers.IO) {
+                    validUris.forEach { contentResolver.delete(it, null, null) }
+                    if (validIds.isNotEmpty()) {
+                        database.photoDao().deleteFromTrash(validIds)
+                    }
+                    val uriStrings = validUris.map { it.toString() }
                     database.photoDao().deleteFromTrashByUris(uriStrings)
                 }
-                Toast.makeText(this@MainActivity, "已彻底删除 ${uris.size} 张照片", Toast.LENGTH_SHORT).show()
+                Toast.makeText(this@MainActivity, "已彻底删除 ${validUris.size} 张照片", Toast.LENGTH_SHORT).show()
                 onComplete()
             }
         }
@@ -691,9 +742,16 @@ class MainActivity : ComponentActivity() {
                 ActiveScreen.RECYCLE_BIN -> {
                     RecycleBinScreen(
                         trashItems = trashItems,
+                        onResolvePhotoItem = { photoId ->
+                            withContext(Dispatchers.IO) {
+                                database.photoDao().getPhotoById(photoId)?.toPhotoItem()
+                            }
+                        },
                         onRestore = { photoIds ->
                             coroutineScope.launch(Dispatchers.IO) {
-                                photoIds.forEach { database.photoDao().restoreFromTrash(it) }
+                                val now = System.currentTimeMillis()
+                                database.photoDao().restoreFromTrashBatch(photoIds)
+                                database.photoDao().markViewedBatch(photoIds, now) // 赋予全新 24 小时绝对冷却保护期！
                             }
                         },
                         onPermanentDelete = { photoIds, uris ->
@@ -1047,7 +1105,9 @@ class MainActivity : ComponentActivity() {
                                                 val last = actionHistory.removeLastOrNull()
                                                 if (last != null && last.second == CardSwipeAction.DELETE) {
                                                     coroutineScope.launch(Dispatchers.IO) {
+                                                        val now = System.currentTimeMillis()
                                                         database.photoDao().restoreFromTrash(last.first.id)
+                                                        database.photoDao().markViewed(last.first.id, now)
                                                     }
                                                 }
                                             }

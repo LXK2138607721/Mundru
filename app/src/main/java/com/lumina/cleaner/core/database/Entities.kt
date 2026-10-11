@@ -50,3 +50,22 @@ data class LocalTrashEntity(
     val size: Long,
     val deletedAt: Long
 )
+
+/**
+ * 转换 PhotoEntity 为核心展示领域模型 PhotoItem
+ */
+fun PhotoEntity.toPhotoItem(): com.lumina.cleaner.core.model.PhotoItem = com.lumina.cleaner.core.model.PhotoItem(
+    id = id,
+    uri = android.net.Uri.parse(uriString),
+    displayName = displayName,
+    dateModified = dateModified,
+    dateTaken = dateTaken,
+    size = size,
+    width = width,
+    height = height,
+    bucketName = bucketName,
+    isLivePhoto = isLivePhoto,
+    motionVideoOffset = motionVideoOffset,
+    motionVideoLength = motionVideoLength,
+    isHdr = isHdr
+)
