@@ -2,8 +2,10 @@ package com.lumina.cleaner.ui.trash
 
 import android.net.Uri
 import androidx.activity.compose.BackHandler
+import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.combinedClickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -25,6 +27,7 @@ import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.rounded.ArrowBack
+import androidx.compose.material.icons.rounded.BrokenImage
 import androidx.compose.material.icons.rounded.CheckCircle
 import androidx.compose.material.icons.rounded.DeleteForever
 import androidx.compose.material.icons.rounded.DeleteOutline
@@ -33,7 +36,6 @@ import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.Icon
-import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.Surface
@@ -41,7 +43,10 @@ import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateListOf
+import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberCoroutineScope
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
@@ -51,31 +56,37 @@ import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
-import coil.compose.AsyncImage
+import coil.compose.SubcomposeAsyncImage
 import com.lumina.cleaner.core.database.LocalTrashEntity
+import com.lumina.cleaner.core.model.PhotoItem
 import com.lumina.cleaner.core.util.HapticFeedback
+import com.lumina.cleaner.ui.viewer.PhotoViewerOverlay
+import kotlinx.coroutines.launch
 
 /**
  * Mundru 真实回收站界面 (RecycleBinScreen)
- * 品牌释义：Mundru 源自格陵兰语（Greenlandic），意为「擦掉 / 擦除」。
- * 核心功能：回收站暂存查看、批量恢复与系统级 Scoped Storage 物理彻底销毁。
+ * 品牌释义：Mundru 源自格陵兰语（Greenlandic），意为「擦净 / 擦除」。
  *
  * 核心功能：
- * 1. 查看所有应用内暂存删除的照片；
- * 2. 多选 / 全选 / 恢复照片回相册；
- * 3. 彻底删除：单次调用 MediaStore.createDeleteRequest(uris) 唤起系统确认框，真实抹掉文件；
- * 4. 严格通过 PhotoId + URI 联合主键销毁，彻底根除幽灵残留条目 (Fix Defect A)。
+ * 1. 查看所有应用内暂存删除的照片，支持原图大图沉浸式预览与详情查看；
+ * 2. 勾选与大图浏览完全解耦：轻触卡片查看大图，长按或点击右上角 40dp 专属热区进行多选；
+ * 3. 稳健防黑屏与死图防护：失效 Uri 自动呈现深灰占位与断裂图符；
+ * 4. 彻底删除：单次调用 MediaStore.createDeleteRequest(uris) 唤起系统确认框，真实抹掉文件；
+ * 5. 严格通过 PhotoId + URI 联合主键销毁，彻底根除幽灵残留条目。
  */
-@OptIn(ExperimentalMaterial3Api::class)
+@OptIn(ExperimentalMaterial3Api::class, ExperimentalFoundationApi::class)
 @Composable
 fun RecycleBinScreen(
     trashItems: List<LocalTrashEntity>,
     onRestore: (List<Long>) -> Unit,
     onPermanentDelete: (List<Long>, List<Uri>) -> Unit,
-    onBack: () -> Unit
+    onBack: () -> Unit,
+    onResolvePhotoItem: (suspend (Long) -> PhotoItem?)? = null
 ) {
     val context = LocalContext.current
+    val coroutineScope = rememberCoroutineScope()
     val selectedIds = remember { mutableStateListOf<Long>() }
+    var previewPhoto by remember { mutableStateOf<PhotoItem?>(null) }
 
     // 拦截系统返回键/手势，平滑返回上一级主界面
     BackHandler(onBack = onBack)
@@ -199,40 +210,84 @@ fun RecycleBinScreen(
                             modifier = Modifier
                                 .aspectRatio(1f)
                                 .clip(RoundedCornerShape(8.dp))
-                                .clickable {
-                                    HapticFeedback.tick(context)
-                                    if (isSelected) selectedIds.remove(item.photoId)
-                                    else selectedIds.add(item.photoId)
-                                }
+                                .combinedClickable(
+                                    onClick = {
+                                        HapticFeedback.click(context)
+                                        coroutineScope.launch {
+                                            val resolved = onResolvePhotoItem?.invoke(item.photoId)
+                                            previewPhoto = resolved ?: item.toPhotoItem()
+                                        }
+                                    },
+                                    onLongClick = {
+                                        HapticFeedback.click(context)
+                                        if (isSelected) selectedIds.remove(item.photoId)
+                                        else selectedIds.add(item.photoId)
+                                    }
+                                )
                         ) {
-                            AsyncImage(
+                            SubcomposeAsyncImage(
                                 model = uri,
                                 contentDescription = null,
                                 contentScale = ContentScale.Crop,
-                                modifier = Modifier.fillMaxSize()
+                                modifier = Modifier.fillMaxSize(),
+                                error = {
+                                    Box(
+                                        modifier = Modifier
+                                            .fillMaxSize()
+                                            .background(MaterialTheme.colorScheme.surfaceVariant),
+                                        contentAlignment = Alignment.Center
+                                    ) {
+                                        Column(
+                                            horizontalAlignment = Alignment.CenterHorizontally,
+                                            verticalArrangement = Arrangement.Center,
+                                            modifier = Modifier.padding(4.dp)
+                                        ) {
+                                            Icon(
+                                                imageVector = Icons.Rounded.BrokenImage,
+                                                contentDescription = "已失效",
+                                                tint = MaterialTheme.colorScheme.error.copy(alpha = 0.7f),
+                                                modifier = Modifier.size(24.dp)
+                                            )
+                                            Spacer(modifier = Modifier.height(2.dp))
+                                            Text(
+                                                text = "原图已失效",
+                                                fontSize = 9.sp,
+                                                color = MaterialTheme.colorScheme.onSurfaceVariant
+                                            )
+                                        }
+                                    }
+                                }
                             )
 
-                            // 勾选标识
+                            // 右上角独立 40dp 勾选触控热区
                             Box(
                                 modifier = Modifier
                                     .align(Alignment.TopEnd)
-                                    .padding(6.dp)
+                                    .size(40.dp)
+                                    .clickable {
+                                        HapticFeedback.tick(context)
+                                        if (isSelected) selectedIds.remove(item.photoId)
+                                        else selectedIds.add(item.photoId)
+                                    },
+                                contentAlignment = Alignment.TopEnd
                             ) {
-                                if (isSelected) {
-                                    Icon(
-                                        Icons.Rounded.CheckCircle,
-                                        contentDescription = "Selected",
-                                        tint = MaterialTheme.colorScheme.primary,
-                                        modifier = Modifier
-                                            .size(22.dp)
-                                            .background(Color.White, CircleShape)
-                                    )
-                                } else {
-                                    Surface(
-                                        shape = CircleShape,
-                                        color = Color.Black.copy(alpha = 0.35f),
-                                        modifier = Modifier.size(20.dp)
-                                    ) { }
+                                Box(modifier = Modifier.padding(6.dp)) {
+                                    if (isSelected) {
+                                        Icon(
+                                            Icons.Rounded.CheckCircle,
+                                            contentDescription = "Selected",
+                                            tint = MaterialTheme.colorScheme.primary,
+                                            modifier = Modifier
+                                                .size(22.dp)
+                                                .background(Color.White, CircleShape)
+                                        )
+                                    } else {
+                                        Surface(
+                                            shape = CircleShape,
+                                            color = Color.Black.copy(alpha = 0.35f),
+                                            modifier = Modifier.size(20.dp)
+                                        ) { }
+                                    }
                                 }
                             }
                         }
@@ -294,8 +349,28 @@ fun RecycleBinScreen(
                 }
             }
         }
+
+        // 大图沉浸预览查看器
+        if (previewPhoto != null) {
+            PhotoViewerOverlay(
+                photo = previewPhoto!!,
+                onDismiss = { previewPhoto = null }
+            )
+        }
     }
 }
+
+private fun LocalTrashEntity.toPhotoItem(): PhotoItem = PhotoItem(
+    id = photoId,
+    uri = Uri.parse(uriString),
+    displayName = "已删除照片 #$photoId",
+    dateModified = deletedAt,
+    dateTaken = deletedAt,
+    size = size,
+    width = 0,
+    height = 0,
+    bucketName = "相册回收站"
+)
 
 private fun formatSize(bytes: Long): String {
     return when {

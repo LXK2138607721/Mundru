@@ -25,6 +25,7 @@ import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.rounded.AutoAwesome
+import androidx.compose.material.icons.rounded.BrokenImage
 import androidx.compose.material.icons.rounded.CalendarToday
 import androidx.compose.material.icons.rounded.Folder
 import androidx.compose.material.icons.rounded.Info
@@ -200,8 +201,9 @@ fun PhotoViewerOverlay(
             .background(Color.Black.copy(alpha = bgAlpha))
             .pointerInput(photo.id) {
                 detectTransformGestures { _, pan, zoom, _ ->
-                    if (currentProgress < 0.95f || isDismissing) return@detectTransformGestures
-                    if (zoom != 1f || pan != Offset.Zero) {
+                    if (currentProgress < 0.60f || isDismissing) return@detectTransformGestures
+                    // 仅当真实发生双指捏合缩放，或在已放大状态下且位移大于 18 像素时，才认定为手势拖动并取消单击延时，绝不因微小手指接触面抖动误杀退出任务
+                    if (kotlin.math.abs(zoom - 1f) > 0.05f || (scaleAnim.value > 1.05f && pan.getDistance() > 18f)) {
                         tapJob?.cancel()
                     }
                     val currentScale = scaleAnim.value
@@ -224,10 +226,10 @@ fun PhotoViewerOverlay(
             .pointerInput(photo.id) {
                 detectTapGestures(
                     onTap = { tapOffset ->
-                        if (currentProgress < 0.90f || isDismissing) return@detectTapGestures
+                        if (currentProgress < 0.60f || isDismissing) return@detectTapGestures
                         val now = System.currentTimeMillis()
-                        val isDoubleTap = (now - lastTapTime < 350L) &&
-                                (tapOffset - lastTapOffset).getDistance() < 160f
+                        val isDoubleTap = (now - lastTapTime < 280L) &&
+                                (tapOffset - lastTapOffset).getDistance() < 120f
 
                         if (isDoubleTap) {
                             // 收到第二击确认双击：立即取消单击退出的延时任务，彻底杜绝误退回主界面！
@@ -264,7 +266,7 @@ fun PhotoViewerOverlay(
                             lastTapOffset = tapOffset
                             tapJob?.cancel()
                             tapJob = coroutineScope.launch {
-                                delay(320L) // 充足且舒适的 320ms 双击消歧窗口，确保双击放大操作极其从容
+                                delay(170L) // 压缩至 170ms 高效双击消歧窗口，让单点退出响应干脆利落，避免用户因等待产生二次连点误判
                                 if (!isDismissing) {
                                     if (scaleAnim.value > 1.05f) {
                                         // 已放大状态下单指轻击：平滑动画还原为 1x 正常比例
@@ -281,7 +283,7 @@ fun PhotoViewerOverlay(
                         }
                     },
                     onPress = {
-                        if (currentProgress < 0.95f || isDismissing) return@detectTapGestures
+                        if (currentProgress < 0.60f || isDismissing) return@detectTapGestures
                         if (photo.isLivePhoto && photo.motionVideoLength > 0 && !isLivePlaying) {
                             HapticFeedback.tick(context)
                             isLivePressing = true
@@ -307,12 +309,37 @@ fun PhotoViewerOverlay(
                 },
             contentAlignment = Alignment.Center
         ) {
-            // 底层高清原图（FIT 居中包含，等比显示）
-            AsyncImage(
+            // 底层高清原图（FIT 居中包含，等比显示，带外部文件失效安全防御）
+            coil.compose.SubcomposeAsyncImage(
                 model = photo.uri,
                 contentDescription = photo.displayName,
                 contentScale = ContentScale.Fit,
-                modifier = Modifier.fillMaxSize()
+                modifier = Modifier.fillMaxSize(),
+                error = {
+                    Box(
+                        modifier = Modifier.fillMaxSize(),
+                        contentAlignment = Alignment.Center
+                    ) {
+                        Column(
+                            horizontalAlignment = Alignment.CenterHorizontally,
+                            modifier = Modifier.padding(24.dp)
+                        ) {
+                            Icon(
+                                imageVector = Icons.Rounded.BrokenImage,
+                                contentDescription = "文件已失效",
+                                tint = MaterialTheme.colorScheme.error,
+                                modifier = Modifier.size(52.dp)
+                            )
+                            Spacer(modifier = Modifier.height(14.dp))
+                            Text(
+                                text = "该照片在外部存储中已被移除或同步，文件已失效",
+                                fontSize = 14.sp,
+                                color = Color.White.copy(alpha = 0.88f),
+                                fontWeight = FontWeight.Medium
+                            )
+                        }
+                    }
+                }
             )
 
             // 实况照片播放器层（精准 FIT 等比居中缩放，未播放时透明，绝不拉伸变形铺满全屏）

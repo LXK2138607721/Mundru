@@ -18,8 +18,10 @@ local.properties
 
 # Temporary review, handover docs & anticrack sandbox
 anticrack_sandbox/
+*报告*.md
 第九与第十轮修复审查报告.md
 第十二轮手感与视觉交互优化修复报告.md
+第二十轮手感调教与回收站算法深度修复报告.md
 未完成清单.md
 PROJECT_HANDOVER.md
 CLAUDE.md
