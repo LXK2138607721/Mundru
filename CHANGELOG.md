@@ -1,8 +1,8 @@
 # 更新日志
 
-## 1.1.1 — 2026-10-25
+## 1.2.0 — 2026-10-25
 
-本次更新修复相片选取与双击缩放问题，保留现有界面、整理模式和操作功能。
+选片更聪明、大图更丝滑。本次更新修复相片选取与双击缩放问题，保留现有界面、整理模式和操作功能。
 
 ### 相片选取与状态一致性
 
@@ -21,11 +21,11 @@
 
 ### 版本与校验
 
-- `versionName`：`1.1.1`；`versionCode`：`3`；沿用原正式签名。
+- `versionName`：`1.2.0`；`versionCode`：`4`；沿用原正式签名。
 - 两位 `gpt-6.1-sol / high` 子代理独立完成非真机审查与校验；初审发现的生命周期和焦点映射问题已补修，并分别通过整改复核。
 - 最终 26 项 JVM 回归通过，Release Lint 0 错误、38 条非阻塞警告，Release 编译、R8、APK 签名与版本检查通过。
 - 按本次要求未运行 App、模拟器或真机测试。
 
-安装包：[Mundru.apk](https://github.com/LXK2138607721/Mundru/releases/download/v1.1.1/Mundru.apk)
+安装包：[Mundru.apk](https://github.com/LXK2138607721/Mundru/releases/download/v1.2.0/Mundru.apk)
 
 技术细节与证据：[修复记录](docs/maintenance-2026-10-25.md)。
