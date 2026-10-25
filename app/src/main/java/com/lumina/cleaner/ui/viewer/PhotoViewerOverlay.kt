@@ -2,12 +2,13 @@ package com.lumina.cleaner.ui.viewer
 
 import androidx.activity.compose.BackHandler
 import androidx.compose.animation.core.Animatable
+import androidx.compose.animation.core.animate
 import androidx.compose.animation.core.FastOutSlowInEasing
 import androidx.compose.animation.core.spring
 import androidx.compose.animation.core.tween
-import androidx.compose.foundation.background
 import androidx.compose.foundation.gestures.detectTapGestures
-import androidx.compose.foundation.gestures.detectTransformGestures
+import androidx.compose.foundation.gestures.rememberTransformableState
+import androidx.compose.foundation.gestures.transformable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -45,30 +46,33 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableFloatStateOf
-import androidx.compose.runtime.mutableLongStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
+import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.draw.drawBehind
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.layout.ContentScale
+import androidx.compose.ui.layout.onSizeChanged
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
-import coil.compose.AsyncImage
+import androidx.compose.ui.unit.IntSize
 import com.lumina.cleaner.core.model.PhotoItem
 import com.lumina.cleaner.core.util.HapticFeedback
 import com.lumina.cleaner.ui.motion.MotionPhotoPlayer
 import com.lumina.cleaner.ui.motion.MotionScaleType
 import kotlinx.coroutines.Job
+import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import java.text.SimpleDateFormat
@@ -93,7 +97,8 @@ import java.util.Locale
 fun PhotoViewerOverlay(
     photo: PhotoItem,
     onDismiss: () -> Unit,
-    modifier: Modifier = Modifier
+    modifier: Modifier = Modifier,
+    initialZoomFocus: Offset? = null // Normalized original-image coordinates, not card/viewport coordinates.
 ) {
     val context = LocalContext.current
     val coroutineScope = rememberCoroutineScope()
@@ -112,12 +117,39 @@ fun PhotoViewerOverlay(
         )
     }
 
-    // 高保真平滑缩放与平移动效控制器 (解决双击瞬间跳变，呈现丝滑变大中间态)
-    val scaleAnim = remember(photo.id) { Animatable(1f) }
-    val offsetXAnim = remember(photo.id) { Animatable(0f) }
-    val offsetYAnim = remember(photo.id) { Animatable(0f) }
-    val scale = scaleAnim.value
-    val offset = Offset(offsetXAnim.value, offsetYAnim.value)
+    var transform by remember(photo.id) { mutableStateOf(PhotoTransform()) }
+    var requestedScale by remember(photo.id) { mutableFloatStateOf(1f) }
+    var transformJob by remember(photo.id) { mutableStateOf<Job?>(null) }
+    var viewportSize by remember { mutableStateOf(IntSize.Zero) }
+
+    fun animateTransform(target: PhotoTransform, durationMillis: Int = 280) {
+        transformJob?.cancel()
+        requestedScale = target.scale
+        val start = transform
+        transformJob = coroutineScope.launch {
+            animate(0f, 1f, animationSpec = tween(durationMillis, easing = FastOutSlowInEasing)) { fraction, _ ->
+                transform = start.interpolate(target, fraction)
+            }
+        }
+    }
+
+    // Card double taps are resolved before opening the overlay; no second tap is lost in the transition.
+    LaunchedEffect(photo.id, initialZoomFocus, viewportSize, photo.aspectRatio) {
+        if (initialZoomFocus != null && viewportSize != IntSize.Zero) {
+            animateTransform(PhotoTransform.zoomedAtImageFocus(
+                initialZoomFocus.x, initialZoomFocus.y, photo.aspectRatio, viewportSize.width, viewportSize.height
+            ))
+        }
+    }
+
+    val transformState = rememberTransformableState { zoom, pan, _ ->
+        if (!isDismissing) {
+            transformJob?.cancel()
+            transformJob = null
+            transform = transform.transformed(zoom, pan.x, pan.y, viewportSize.width, viewportSize.height)
+            requestedScale = transform.scale
+        }
+    }
 
     // 平滑缩小并退出查看器
     fun dismissWithAnimation() {
@@ -125,12 +157,7 @@ fun PhotoViewerOverlay(
         isDismissing = true
         HapticFeedback.click(context)
         coroutineScope.launch {
-            if (scaleAnim.value > 1.05f) {
-                val resetSpec = tween<Float>(durationMillis = 240, easing = FastOutSlowInEasing)
-                launch { scaleAnim.animateTo(1f, resetSpec) }
-                launch { offsetXAnim.animateTo(0f, resetSpec) }
-                launch { offsetYAnim.animateTo(0f, resetSpec) }
-            }
+            animateTransform(PhotoTransform(), 240)
             animProgress.animateTo(
                 targetValue = 0f,
                 animationSpec = tween(
@@ -141,6 +168,7 @@ fun PhotoViewerOverlay(
             onDismiss()
         }
     }
+    val currentDismiss by rememberUpdatedState(::dismissWithAnimation)
 
     BackHandler(onBack = { dismissWithAnimation() })
     var showDetailSheet by remember { mutableStateOf(false) }
@@ -170,125 +198,56 @@ fun PhotoViewerOverlay(
         }
     }
 
-    val currentProgress = animProgress.value
-    // 背景深色暗幕：平滑淡入与淡出
-    val bgAlpha = (currentProgress * 0.98f).coerceIn(0f, 0.98f)
-    // 缩放尺寸因子：从 0.50f（主界面居中卡片比例）平滑放大到 1.0f；退出时从 1.0f 一直平滑缩小至 0.50f
-    val baseScale = 0.50f + 0.50f * currentProgress
-    val contentScaleFactor = baseScale * scale
-    // 内容透明度：退出末端无缝隐化交接
-    val contentAlpha = if (isDismissing) {
-        (currentProgress / 0.35f).coerceIn(0f, 1f)
-    } else {
-        currentProgress.coerceIn(0f, 1f)
+    fun controlsAlpha(): Float {
+        val progress = animProgress.value
+        return if (isDismissing) ((progress - 0.70f) / 0.30f).coerceIn(0f, 1f)
+        else ((progress - 0.45f) / 0.55f).coerceIn(0f, 1f)
     }
-    // 圆角：全屏 0dp，缩回卡片形态时恢复 24dp
-    val cornerRadius = (24.dp * (1f - currentProgress)).coerceAtLeast(0.dp)
-    // 顶部操作控件透明度：退出时立即淡隐
-    val controlsAlpha = if (isDismissing) {
-        ((currentProgress - 0.70f) / 0.30f).coerceIn(0f, 1f)
-    } else {
-        ((currentProgress - 0.45f) / 0.55f).coerceIn(0f, 1f)
-    }
-
-    var lastTapTime by remember { mutableLongStateOf(0L) }
-    var lastTapOffset by remember { mutableStateOf(Offset.Zero) }
-    var tapJob by remember { mutableStateOf<Job?>(null) }
 
     Box(
         modifier = modifier
             .fillMaxSize()
-            .background(Color.Black.copy(alpha = bgAlpha))
-            .pointerInput(photo.id) {
-                detectTransformGestures { _, pan, zoom, _ ->
-                    if (currentProgress < 0.60f || isDismissing) return@detectTransformGestures
-                    // 仅当真实发生双指捏合缩放，或在已放大状态下且位移大于 18 像素时，才认定为手势拖动并取消单击延时，绝不因微小手指接触面抖动误杀退出任务
-                    if (kotlin.math.abs(zoom - 1f) > 0.05f || (scaleAnim.value > 1.05f && pan.getDistance() > 18f)) {
-                        tapJob?.cancel()
-                    }
-                    val currentScale = scaleAnim.value
-                    val newScale = (currentScale * zoom).coerceIn(1f, 5f)
-
-                    coroutineScope.launch {
-                        scaleAnim.snapTo(newScale)
-                        if (newScale > 1f) {
-                            val maxPanX = (size.width * (newScale - 1f)) / 2f
-                            val maxPanY = (size.height * (newScale - 1f)) / 2f
-                            offsetXAnim.snapTo((offsetXAnim.value + pan.x).coerceIn(-maxPanX, maxPanX))
-                            offsetYAnim.snapTo((offsetYAnim.value + pan.y).coerceIn(-maxPanY, maxPanY))
-                        } else {
-                            offsetXAnim.snapTo(0f)
-                            offsetYAnim.snapTo(0f)
-                        }
-                    }
-                }
-            }
+            .drawBehind { drawRect(Color.Black.copy(alpha = (animProgress.value * 0.98f).coerceIn(0f, 0.98f))) }
+            .onSizeChanged { viewportSize = it }
+            .transformable(
+                state = transformState,
+                // Consume genuine drags after platform touch slop, even at 1x; taps stay intact.
+                lockRotationOnZoomPan = true,
+                enabled = !isDismissing
+            )
             .pointerInput(photo.id) {
                 detectTapGestures(
-                    onTap = { tapOffset ->
-                        if (currentProgress < 0.60f || isDismissing) return@detectTapGestures
-                        val now = System.currentTimeMillis()
-                        val isDoubleTap = (now - lastTapTime < 280L) &&
-                                (tapOffset - lastTapOffset).getDistance() < 120f
-
-                        if (isDoubleTap) {
-                            // 收到第二击确认双击：立即取消单击退出的延时任务，彻底杜绝误退回主界面！
-                            tapJob?.cancel()
-                            tapJob = null
-                            lastTapTime = 0L
-                            HapticFeedback.click(context)
-
-                            coroutineScope.launch {
-                                // 280ms FastOutSlow 动力学插值动画，呈现清晰细腻的放大过渡中间态
-                                val animSpec = tween<Float>(durationMillis = 280, easing = FastOutSlowInEasing)
-                                if (scaleAnim.value > 1.2f) {
-                                    // 已放大状态下双击：平滑缩小归位为 1x 经典比例
-                                    launch { scaleAnim.animateTo(1f, animSpec) }
-                                    launch { offsetXAnim.animateTo(0f, animSpec) }
-                                    launch { offsetYAnim.animateTo(0f, animSpec) }
-                                } else {
-                                    // 未放大状态下双击：从 1x 丝滑舒展放大至 2.5x 并平滑聚焦对齐点击中心
-                                    val targetScale = 2.5f
-                                    val centerX = size.width / 2f
-                                    val centerY = size.height / 2f
-                                    val maxPanX = (size.width * (targetScale - 1f)) / 2f
-                                    val maxPanY = (size.height * (targetScale - 1f)) / 2f
-                                    val targetX = ((centerX - tapOffset.x) * 1.5f).coerceIn(-maxPanX, maxPanX)
-                                    val targetY = ((centerY - tapOffset.y) * 1.5f).coerceIn(-maxPanY, maxPanY)
-
-                                    launch { scaleAnim.animateTo(targetScale, animSpec) }
-                                    launch { offsetXAnim.animateTo(targetX, animSpec) }
-                                    launch { offsetYAnim.animateTo(targetY, animSpec) }
-                                }
-                            }
-                        } else {
-                            lastTapTime = now
-                            lastTapOffset = tapOffset
-                            tapJob?.cancel()
-                            tapJob = coroutineScope.launch {
-                                delay(170L) // 压缩至 170ms 高效双击消歧窗口，让单点退出响应干脆利落，避免用户因等待产生二次连点误判
-                                if (!isDismissing) {
-                                    if (scaleAnim.value > 1.05f) {
-                                        // 已放大状态下单指轻击：平滑动画还原为 1x 正常比例
-                                        val animSpec = tween<Float>(durationMillis = 240, easing = FastOutSlowInEasing)
-                                        launch { scaleAnim.animateTo(1f, animSpec) }
-                                        launch { offsetXAnim.animateTo(0f, animSpec) }
-                                        launch { offsetYAnim.animateTo(0f, animSpec) }
-                                    } else {
-                                        // 未放大状态下轻击：确认非双击后平滑缩小退出大图，返回主界面
-                                        dismissWithAnimation()
-                                    }
-                                }
-                            }
+                    onTap = {
+                        if (!isDismissing) {
+                            if (requestedScale > 1.05f) animateTransform(PhotoTransform(), 240)
+                            else currentDismiss()
                         }
                     },
+                    onDoubleTap = { position ->
+                        if (!isDismissing) {
+                            HapticFeedback.click(context)
+                            val target = PhotoTransform.doubleTapTarget(
+                                requestedScale, position.x / size.width, position.y / size.height, size.width, size.height
+                            )
+                            animateTransform(target)
+                        }
+                    },
+                    onLongPress = if (photo.isLivePhoto && photo.motionVideoLength > 0) ({ _ -> }) else null,
                     onPress = {
-                        if (currentProgress < 0.60f || isDismissing) return@detectTapGestures
-                        if (photo.isLivePhoto && photo.motionVideoLength > 0 && !isLivePlaying) {
-                            HapticFeedback.tick(context)
-                            isLivePressing = true
-                            tryAwaitRelease()
-                            isLivePressing = false
+                        if (!isDismissing && photo.isLivePhoto && photo.motionVideoLength > 0 && !isLivePlaying) {
+                            coroutineScope {
+                                val preview = launch {
+                                    delay(viewConfiguration.longPressTimeoutMillis)
+                                    HapticFeedback.tick(context)
+                                    isLivePressing = true
+                                }
+                                try {
+                                    tryAwaitRelease()
+                                } finally {
+                                    preview.cancel()
+                                    isLivePressing = false
+                                }
+                            }
                         }
                     }
                 )
@@ -299,13 +258,16 @@ fun PhotoViewerOverlay(
             modifier = Modifier
                 .fillMaxSize()
                 .graphicsLayer {
-                    scaleX = contentScaleFactor
-                    scaleY = contentScaleFactor
-                    translationX = offset.x
-                    translationY = offset.y
-                    alpha = contentAlpha
+                    // Read per-frame state in the layer, not in the whole viewer composition.
+                    val progress = animProgress.value
+                    val contentScale = (0.50f + 0.50f * progress) * transform.scale
+                    scaleX = contentScale
+                    scaleY = contentScale
+                    translationX = transform.x
+                    translationY = transform.y
+                    alpha = if (isDismissing) (progress / 0.35f).coerceIn(0f, 1f) else progress.coerceIn(0f, 1f)
                     clip = true
-                    shape = RoundedCornerShape(cornerRadius)
+                    shape = RoundedCornerShape((24.dp * (1f - progress)).coerceAtLeast(0.dp))
                 },
             contentAlignment = Alignment.Center
         ) {
@@ -368,7 +330,7 @@ fun PhotoViewerOverlay(
                     .align(Alignment.TopStart)
                     .statusBarsPadding()
                     .padding(top = 16.dp, start = 16.dp)
-                    .graphicsLayer { alpha = controlsAlpha },
+                    .graphicsLayer { alpha = controlsAlpha() },
                 horizontalArrangement = Arrangement.spacedBy(8.dp),
                 verticalAlignment = Alignment.CenterVertically
             ) {
@@ -471,7 +433,7 @@ fun PhotoViewerOverlay(
                 .statusBarsPadding()
                 .padding(top = 16.dp, end = 16.dp)
                 .size(40.dp)
-                .graphicsLayer { alpha = controlsAlpha }
+                .graphicsLayer { alpha = controlsAlpha() }
         ) {
             IconButton(onClick = {
                 if (isDismissing) return@IconButton

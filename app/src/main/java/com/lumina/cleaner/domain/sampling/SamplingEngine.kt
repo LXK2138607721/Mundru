@@ -5,7 +5,14 @@ import com.lumina.cleaner.core.model.MonthBucket
 import com.lumina.cleaner.core.model.PhotoItem
 import com.lumina.cleaner.core.model.SamplingMode
 import java.util.Calendar
+import java.util.Locale
+import java.time.Instant
+import java.time.ZoneId
+import java.time.temporal.ChronoUnit
 import kotlin.math.abs
+import kotlin.random.Random
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.withContext
 
 /**
  * Mundru 智能抽样引擎 (SamplingEngine)
@@ -14,15 +21,18 @@ import kotlin.math.abs
  *
  * 核心整理模式（4 大黄金板块）：
  * 1. 分层随机漫步 (Random Walk)：时间轴分桶 + 严格 24 小时冷却，保证全相册漫游且绝不反复重复
- * 2. 时光考古 (Time Capsule)：专注至少 180 天前的历史老照片与「那年今日」，彻底剔除近期图片
+ * 2. 时光考古 (Time Capsule)：优先至少 180 天前的老照片；无半年老照片时保留至少 30 天的原有降级规则
  * 3. 图集专清 (Album Cleanup)：指定相册深度清理，加入冷却游标机制，每批推送未整理的新照片
  * 4. 月份专清 (Month Cleanup)：指定历史月份归档清理，加入冷却游标机制
  *
  * 严格去重与冷却契约：
  * 任何被左滑保留（不打算清理）的图片，在 24 小时冷却保护期内绝对不会在后续轮次中重复出现；
- * 15 分钟内刚划过的图片进行硬性隔离；若相片库已全部划过，则按最久未查看正序兜底，绝不连续两轮出现同一张。
+ * 候选不足时返回实际剩余张数，不用冷却中的照片补满。
  */
-class SamplingEngine {
+class SamplingEngine(
+    private val clock: () -> Long = System::currentTimeMillis,
+    private val random: Random = Random.Default
+) {
 
     companion object {
         const val COOLDOWN_WINDOW_MS = 24 * 3600 * 1000L             // 24 小时严格冷却保护期
@@ -41,10 +51,8 @@ class SamplingEngine {
         targetAlbumBucket: String? = null,
         targetMonthBucket: MonthBucket? = null,
         onHashComputed: (suspend (Long, Long) -> Unit)? = null
-    ): List<PhotoItem> {
-        if (allPhotos.isEmpty()) return emptyList()
-
-        return when (mode) {
+    ): List<PhotoItem> = withContext(Dispatchers.Default) {
+        when (mode) {
             SamplingMode.RANDOM_WALK -> getStratifiedRandomBatch(allPhotos, batchSize, viewHistoryMap)
             SamplingMode.TIME_CAPSULE -> getTimeCapsuleBatch(allPhotos, batchSize, viewHistoryMap)
             SamplingMode.ALBUM_CLEANUP -> getAlbumCleanupBatch(allPhotos, batchSize, targetAlbumBucket, viewHistoryMap)
@@ -54,31 +62,26 @@ class SamplingEngine {
 
     /**
      * 核心冷却分流器：
-     * 将候选列表划分为 [freshPhotos]（未查看或已度过冷却期）与 [coolingPhotos]（冷却中）。
-     * 优先全量选用 freshPhotos；若不足，再用最久远前查看的 coolingPhotos 补足，
-     * 且在任何情况下严格排除 15 分钟内刚刚划过的照片（除非总库太小）。
+     * 全模式严格排除 24 小时内已审阅项，同一批次按 MediaStore ID 去重。
      */
     private fun filterWithCooldown(
         candidates: List<PhotoItem>,
-        batchSize: Int,
         viewHistory: Map<Long, Long>,
-        now: Long = System.currentTimeMillis()
+        now: Long = clock()
     ): List<PhotoItem> {
         if (candidates.isEmpty()) return emptyList()
 
         val freshPhotos = mutableListOf<PhotoItem>()
+        val ids = mutableSetOf<Long>()
 
         for (photo in candidates) {
             val lastViewed = viewHistory[photo.id] ?: 0L
             val elapsed = now - lastViewed
-            if (lastViewed <= 0L || elapsed >= COOLDOWN_WINDOW_MS) {
+            if ((lastViewed <= 0L || elapsed >= COOLDOWN_WINDOW_MS) && ids.add(photo.id)) {
                 freshPhotos.add(photo)
             }
         }
 
-        // 严格 24 小时冷却硬性闭环：
-        // 彻底根除不足 batchSize 时用 15 分钟前跳过的照片强行填仓的漏洞。
-        // 未审阅照片不足时优雅降级返回实际剩余张数（甚至空列表），绝不循环拉回当天刚刚跳过的照片。
         return freshPhotos
     }
 
@@ -91,91 +94,72 @@ class SamplingEngine {
         batchSize: Int,
         viewHistory: Map<Long, Long>
     ): List<PhotoItem> {
-        val now = System.currentTimeMillis()
-        val eligiblePhotos = filterWithCooldown(allPhotos, batchSize, viewHistory, now)
-        if (eligiblePhotos.size <= batchSize) return eligiblePhotos.shuffled()
+        if (batchSize <= 0) return emptyList()
+        val eligiblePhotos = filterWithCooldown(allPhotos, viewHistory)
+        if (eligiblePhotos.size <= batchSize) return eligiblePhotos.shuffled(random)
 
         val sorted = eligiblePhotos.sortedBy { it.dateTaken.takeIf { t -> t > 0 } ?: it.dateModified }
 
         val bucketCount = 5.coerceAtMost(batchSize)
-        val chunkSize = (sorted.size + bucketCount - 1) / bucketCount
-        val buckets = sorted.chunked(chunkSize)
-
         val selected = mutableListOf<PhotoItem>()
-        val pickedIds = mutableSetOf<Long>()
-        val perBucketTarget = (batchSize + bucketCount - 1) / bucketCount
-
-        for (bucket in buckets) {
-            val available = bucket.filter { it.id !in pickedIds }
-            if (available.isEmpty()) continue
-
-            val sampleCount = perBucketTarget.coerceAtMost(batchSize - selected.size)
-            val bucketPicks = available.shuffled().take(sampleCount)
-            for (item in bucketPicks) {
-                selected.add(item)
-                pickedIds.add(item.id)
-                if (selected.size >= batchSize) break
-            }
-            if (selected.size >= batchSize) break
+        val baseQuota = batchSize / bucketCount
+        val extraBuckets = (0 until bucketCount).filter { index ->
+            ((index + 1L) * sorted.size / bucketCount) - (index.toLong() * sorted.size / bucketCount) > baseQuota
+        }.shuffled(random).take(batchSize % bucketCount).toSet()
+        for (index in 0 until bucketCount) {
+            // Exactly bucketCount non-empty strata, including both ends of the timeline.
+            val start = (index.toLong() * sorted.size / bucketCount).toInt()
+            val end = ((index + 1L) * sorted.size / bucketCount).toInt()
+            val quota = baseQuota + if (index in extraBuckets) 1 else 0
+            selected.addAll(sorted.subList(start, end).shuffled(random).take(quota))
         }
-
-        if (selected.size < batchSize) {
-            val remaining = eligiblePhotos.filter { it.id !in pickedIds }.shuffled()
-            for (item in remaining) {
-                selected.add(item)
-                if (selected.size >= batchSize) break
-            }
-        }
-
-        return selected.shuffled()
+        return selected.shuffled(random)
     }
 
     /**
      * 2. 时光考古：专注至少 180 天前的历史老照片 + 那年今日
-     * 修复：彻底排除近期（< 180 天）拍摄的照片，严格应用冷却防重
+     * 无半年老照片时使用至少 30 天的老照片，全分支严格应用冷却防重。
      */
     fun getTimeCapsuleBatch(
         allPhotos: List<PhotoItem>,
         batchSize: Int,
         viewHistory: Map<Long, Long> = emptyMap()
     ): List<PhotoItem> {
-        val now = System.currentTimeMillis()
-        val calendar = Calendar.getInstance()
-        val currentMonth = calendar.get(Calendar.MONTH)
-        val currentDay = calendar.get(Calendar.DAY_OF_MONTH)
-        val currentYear = calendar.get(Calendar.YEAR)
+        if (batchSize <= 0) return emptyList()
+        val now = clock()
+        val zone = ZoneId.systemDefault()
+        val today = Instant.ofEpochMilli(now).atZone(zone).toLocalDate()
 
         // 严格条件：只允许至少 180 天前的历史深水区照片
         val historicalPhotos = allPhotos.filter { photo ->
             val photoTime = if (photo.dateTaken > 0) photo.dateTaken else photo.dateModified
             val ageMs = now - photoTime
-            ageMs >= TIME_CAPSULE_MIN_AGE_MS
+            photoTime > 0L && ageMs >= TIME_CAPSULE_MIN_AGE_MS
         }
 
         if (historicalPhotos.isEmpty()) {
-            // 如果整个手机里都没有超过半年的老照片，则取最老的前 20% 照片（但必须排除 30 天以内的）
+            // 保留原有降级规则：没有半年老照片时，按最老优先取至少 30 天前的照片。
             val olderFallback = allPhotos
                 .filter { photo ->
                     val photoTime = if (photo.dateTaken > 0) photo.dateTaken else photo.dateModified
-                    (now - photoTime) >= 30L * 24 * 3600 * 1000L
+                    photoTime > 0L && (now - photoTime) >= 30L * 24 * 3600 * 1000L
                 }
                 .sortedBy { if (it.dateTaken > 0) it.dateTaken else it.dateModified }
-            return filterWithCooldown(olderFallback, batchSize, viewHistory, now).take(batchSize)
+            return filterWithCooldown(olderFallback, viewHistory, now).take(batchSize)
         }
 
         // 应用冷却过滤，排除近期刚看过的
-        val cooledHistorical = filterWithCooldown(historicalPhotos, batchSize, viewHistory, now)
+        val cooledHistorical = filterWithCooldown(historicalPhotos, viewHistory, now)
 
-        // 步骤 1：那年今日 (On This Day)：往年同月、同日（±5天内）
+        // 步骤 1：那年今日（±5 天），窗口允许跨月、跨年，闰日映射到非闰年的 2 月 28 日。
         val onThisDayPhotos = cooledHistorical.filter { photo ->
             val photoTime = if (photo.dateTaken > 0) photo.dateTaken else photo.dateModified
-            calendar.timeInMillis = photoTime
-            val photoYear = calendar.get(Calendar.YEAR)
-            val photoMonth = calendar.get(Calendar.MONTH)
-            val photoDay = calendar.get(Calendar.DAY_OF_MONTH)
-
-            photoYear < currentYear && photoMonth == currentMonth && abs(photoDay - currentDay) <= 5
-        }.shuffled()
+            val date = Instant.ofEpochMilli(photoTime).atZone(zone).toLocalDate()
+            val anniversary = date.withYear(today.year)
+            date.year < today.year && (-1L..1L).any { yearOffset ->
+                abs(ChronoUnit.DAYS.between(today, anniversary.plusYears(yearOffset))) <= 5L
+            }
+        }.shuffled(random)
 
         if (onThisDayPhotos.size >= batchSize) {
             return onThisDayPhotos.take(batchSize)
@@ -203,6 +187,7 @@ class SamplingEngine {
         targetAlbumBucket: String?,
         viewHistory: Map<Long, Long> = emptyMap()
     ): List<PhotoItem> {
+        if (batchSize <= 0) return emptyList()
         val filtered = if (targetAlbumBucket != null) {
             allPhotos.filter { it.bucketName == targetAlbumBucket }
         } else {
@@ -210,7 +195,7 @@ class SamplingEngine {
         }
         if (filtered.isEmpty()) return emptyList()
 
-        val cooled = filterWithCooldown(filtered, batchSize, viewHistory)
+        val cooled = filterWithCooldown(filtered, viewHistory)
         return cooled.sortedByDescending { it.dateTaken.takeIf { t -> t > 0 } ?: it.dateModified }.take(batchSize)
     }
 
@@ -223,6 +208,7 @@ class SamplingEngine {
         targetMonthBucket: MonthBucket?,
         viewHistory: Map<Long, Long> = emptyMap()
     ): List<PhotoItem> {
+        if (batchSize <= 0) return emptyList()
         val filtered = if (targetMonthBucket != null) {
             allPhotos.filter {
                 val time = if (it.dateTaken > 0) it.dateTaken else it.dateModified
@@ -233,7 +219,7 @@ class SamplingEngine {
         }
         if (filtered.isEmpty()) return emptyList()
 
-        val cooled = filterWithCooldown(filtered, batchSize, viewHistory)
+        val cooled = filterWithCooldown(filtered, viewHistory)
         return cooled.sortedByDescending { it.dateTaken.takeIf { t -> t > 0 } ?: it.dateModified }.take(batchSize)
     }
 
@@ -249,7 +235,7 @@ class SamplingEngine {
             calendar.timeInMillis = time
             val year = calendar.get(Calendar.YEAR)
             val month = calendar.get(Calendar.MONTH) + 1
-            val key = String.format("%04d-%02d", year, month)
+            val key = String.format(Locale.ROOT, "%04d-%02d", year, month)
             map.getOrPut(key) { mutableListOf() }.add(photo)
         }
 

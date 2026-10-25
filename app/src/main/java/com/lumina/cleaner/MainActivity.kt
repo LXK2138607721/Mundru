@@ -76,11 +76,13 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.core.content.ContextCompat
 import androidx.lifecycle.lifecycleScope
+import androidx.room.withTransaction
 import com.lumina.cleaner.core.database.LocalTrashEntity
 import com.lumina.cleaner.core.database.MundruDatabase
 import com.lumina.cleaner.core.database.PhotoEntity
@@ -128,6 +130,7 @@ enum class ActiveScreen {
 class MainActivity : ComponentActivity() {
 
     private val database by lazy { MundruDatabase.getInstance(this) }
+    private val photoWrites get() = (application as MundruApp).photoWrites
     private val samplingEngine = SamplingEngine()
     private val albumManager by lazy { AlbumManager(this) }
 
@@ -449,6 +452,8 @@ class MainActivity : ComponentActivity() {
     ) {
         val prefs = remember { getSharedPreferences("mundru_prefs", Context.MODE_PRIVATE) }
         val coroutineScope = rememberCoroutineScope()
+        val photoDatabase = remember { database }
+        val photoDao = remember { photoDatabase.photoDao() }
 
         var currentBatchSize by remember {
             mutableIntStateOf(prefs.getInt("batch_size", 15))
@@ -480,7 +485,7 @@ class MainActivity : ComponentActivity() {
 
         // 回收站与设置界面状态
         var activeScreen by remember { mutableStateOf(ActiveScreen.MAIN) }
-        val trashItemsFlow = remember { database.photoDao().getTrashItems() }.collectAsState(initial = emptyList())
+        val trashItemsFlow = remember { photoDao.getTrashItems() }.collectAsState(initial = emptyList())
         val trashItems = trashItemsFlow.value
 
         // 图集专清弹层状态
@@ -502,7 +507,16 @@ class MainActivity : ComponentActivity() {
         // 历史操作栈（用于右滑上一张与回溯撤回）
         val actionHistory = remember { mutableStateListOf<Pair<PhotoItem, CardSwipeAction>>() }
         var viewingPhoto by remember { mutableStateOf<PhotoItem?>(null) }
+        var viewingZoomFocus by remember { mutableStateOf<Offset?>(null) }
         var reloadBatchJob by remember { mutableStateOf<kotlinx.coroutines.Job?>(null) }
+
+        fun persistPhotoAction(write: suspend () -> Unit) {
+            val committed = photoWrites.enqueue(write)
+            coroutineScope.launch {
+                committed.join()
+                totalReviewedCount = withContext(Dispatchers.IO) { photoDao.getTotalReviewedCount() ?: 0L }
+            }
+        }
 
         // 系统返回拦截：设置中心、回收站全屏（大图查看由 PhotoViewerOverlay 内部平滑收拢动效接管）
         BackHandler(enabled = activeScreen != ActiveScreen.MAIN) {
@@ -512,9 +526,13 @@ class MainActivity : ComponentActivity() {
         // 重新加载批次（带取消机制与全模式 24h 冷却防重复算法）
         fun reloadBatch(mode: SamplingMode) {
             reloadBatchJob?.cancel()
+            val batchSize = currentBatchSize
+            val albumBucket = selectedAlbumBucket
+            val monthBucket = selectedMonthBucket
+            val libraryPhotos = allLibraryPhotos
             reloadBatchJob = coroutineScope.launch {
                 isLoading = true
-                if (allLibraryPhotos.isEmpty()) {
+                if (libraryPhotos.isEmpty()) {
                     currentBatch = emptyList()
                     currentIndex = 0
                     actionHistory.clear()
@@ -522,11 +540,22 @@ class MainActivity : ComponentActivity() {
                     isLoading = false
                     return@launch
                 }
+                photoWrites.awaitPendingWrites()
                 val (activePhotos, viewHistoryMap) = withContext(Dispatchers.IO) {
-                    val activeEntities = database.photoDao().getAllActivePhotosSync()
+                    val activeEntities = photoDao.getAllActivePhotosSync()
                     val entityMap = activeEntities.associateBy { it.id }
                     val historyMap = activeEntities.associate { it.id to it.lastViewedAt }
-                    val filtered = allLibraryPhotos.filter { it.id in entityMap }
+                    // Read parsed metadata from Room, not the stale startup snapshot.
+                    val filtered = libraryPhotos.mapNotNull { photo ->
+                        entityMap[photo.id]?.let { cached ->
+                            photo.copy(
+                                isLivePhoto = cached.isLivePhoto,
+                                motionVideoOffset = cached.motionVideoOffset,
+                                motionVideoLength = cached.motionVideoLength,
+                                isHdr = cached.isHdr || photo.isHdr
+                            )
+                        }
+                    }
                     filtered to historyMap
                 }
 
@@ -534,10 +563,10 @@ class MainActivity : ComponentActivity() {
                     context = this@MainActivity,
                     mode = mode,
                     allPhotos = activePhotos,
-                    batchSize = currentBatchSize,
+                    batchSize = batchSize,
                     viewHistoryMap = viewHistoryMap,
-                    targetAlbumBucket = selectedAlbumBucket,
-                    targetMonthBucket = selectedMonthBucket
+                    targetAlbumBucket = albumBucket,
+                    targetMonthBucket = monthBucket
                 )
 
                 // 异步轻量检测实况照片与 HDR，否定结果记为 -1L 杜绝重复扫描（Fix P1-1）
@@ -546,36 +575,39 @@ class MainActivity : ComponentActivity() {
                         if (!photo.isLivePhoto && photo.motionVideoLength == 0L) {
                             val mediaMeta = MotionPhotoParser.parse(this@MainActivity, photo.uri)
                             val finalLength = if (mediaMeta.isMotionPhoto) mediaMeta.videoLength else -1L
-                            database.photoDao().updateMotionAndHdrMetadata(
+                            val isHdr = mediaMeta.isHdr || photo.isHdr
+                            photoDao.updateMotionAndHdrMetadata(
                                 id = photo.id,
                                 isLivePhoto = mediaMeta.isMotionPhoto,
                                 offset = mediaMeta.videoOffset,
                                 length = finalLength,
-                                isHdr = mediaMeta.isHdr
+                                isHdr = isHdr
                             )
                             photo.copy(
                                 isLivePhoto = mediaMeta.isMotionPhoto,
                                 motionVideoOffset = mediaMeta.videoOffset,
                                 motionVideoLength = finalLength,
-                                isHdr = mediaMeta.isHdr
+                                isHdr = isHdr
                             )
                         } else photo
                     }
                 }
 
-                val hasCandidatesForMode = when (mode) {
-                    SamplingMode.ALBUM_CLEANUP -> activePhotos.any { it.bucketName == selectedAlbumBucket }
-                    SamplingMode.MONTH_CLEANUP -> selectedMonthBucket?.let { mb ->
-                        activePhotos.any {
+                val hasCandidatesForMode = withContext(Dispatchers.Default) {
+                    when (mode) {
+                        SamplingMode.ALBUM_CLEANUP -> activePhotos.any { albumBucket == null || it.bucketName == albumBucket }
+                        SamplingMode.MONTH_CLEANUP -> monthBucket?.let { mb ->
+                            activePhotos.any {
+                                val t = if (it.dateTaken > 0) it.dateTaken else it.dateModified
+                                t in mb.startMillis until mb.endMillis
+                            }
+                        } ?: activePhotos.isNotEmpty()
+                        SamplingMode.TIME_CAPSULE -> activePhotos.any {
                             val t = if (it.dateTaken > 0) it.dateTaken else it.dateModified
-                            t in mb.startMillis..mb.endMillis
+                            t > 0L && (System.currentTimeMillis() - t) >= 30L * 24 * 3600 * 1000L
                         }
-                    } ?: false
-                    SamplingMode.TIME_CAPSULE -> activePhotos.any {
-                        val t = if (it.dateTaken > 0) it.dateTaken else it.dateModified
-                        (System.currentTimeMillis() - t) >= 30L * 24 * 3600 * 1000L
+                        SamplingMode.RANDOM_WALK -> activePhotos.isNotEmpty()
                     }
-                    SamplingMode.RANDOM_WALK -> activePhotos.isNotEmpty()
                 }
                 isBatchInCooldown = enrichedBatch.isEmpty() && hasCandidatesForMode
 
@@ -586,51 +618,45 @@ class MainActivity : ComponentActivity() {
             }
         }
 
-        // 初始化加载相册（Fix Defect D：读取旧行合并，绝不覆盖清空 viewCount、lastViewedAt 与实况/HDR 元数据）
+        // Serialize read/merge/REPLACE with accepted review writes, including those from a previous Activity.
         LaunchedEffect(Unit) {
-            withContext(Dispatchers.IO) {
-                val photos = scanMediaStoreFast()
-                val existingMap = database.photoDao().getAllPhotosSync().associateBy { it.id }
-
-                val entities = photos.map { photo ->
-                    val existing = existingMap[photo.id]
-                    PhotoEntity(
-                        id = photo.id,
-                        uriString = photo.uri.toString(),
-                        displayName = photo.displayName,
-                        dateModified = photo.dateModified,
-                        dateTaken = photo.dateTaken,
-                        size = photo.size,
-                        width = photo.width,
-                        height = photo.height,
-                        bucketName = photo.bucketName,
-                        relativePath = null,
-                        isLivePhoto = existing?.isLivePhoto ?: false,
-                        motionVideoOffset = existing?.motionVideoOffset ?: 0L,
-                        motionVideoLength = existing?.motionVideoLength ?: 0L,
-                        isHdr = existing?.isHdr ?: photo.isHdr,
-                        viewCount = existing?.viewCount ?: 0,
-                        lastViewedAt = existing?.lastViewedAt ?: 0L
-                    )
-                }
-                database.photoDao().insertOrUpdateAll(entities)
-
-                // 将数据库中已缓存的实况与 HDR 数据合并回内存列表
-                allLibraryPhotos = photos.map { p ->
-                    val existing = existingMap[p.id]
-                    if (existing != null) {
-                        p.copy(
-                            isLivePhoto = existing.isLivePhoto,
-                            motionVideoOffset = existing.motionVideoOffset,
-                            motionVideoLength = existing.motionVideoLength,
-                            isHdr = existing.isHdr || p.isHdr
+            val photos = withContext(Dispatchers.IO) { scanMediaStoreFast() }
+            var synchronizedEntities = emptyList<PhotoEntity>()
+            val synchronized = photoWrites.enqueue {
+                synchronizedEntities = photoDatabase.withTransaction {
+                    val existingMap = photoDao.getAllPhotosSync().associateBy { it.id }
+                    val entities = photos.map { photo ->
+                        val existing = existingMap[photo.id]
+                        PhotoEntity(
+                            id = photo.id,
+                            uriString = photo.uri.toString(),
+                            displayName = photo.displayName,
+                            dateModified = photo.dateModified,
+                            dateTaken = photo.dateTaken,
+                            size = photo.size,
+                            width = photo.width,
+                            height = photo.height,
+                            bucketName = photo.bucketName,
+                            relativePath = null,
+                            isLivePhoto = existing?.isLivePhoto ?: false,
+                            motionVideoOffset = existing?.motionVideoOffset ?: 0L,
+                            motionVideoLength = existing?.motionVideoLength ?: 0L,
+                            isHdr = existing?.isHdr == true || photo.isHdr,
+                            viewCount = existing?.viewCount ?: 0,
+                            lastViewedAt = existing?.lastViewedAt ?: 0L
                         )
-                    } else p
+                    }
+                    photoDao.insertOrUpdateAll(entities)
+                    entities
                 }
-
-                totalReviewedCount = database.photoDao().getTotalReviewedCount() ?: 0L
-                totalPhotosCount = database.photoDao().getActivePhotoCount()
             }
+            synchronized.join()
+            allLibraryPhotos = synchronizedEntities.map { it.toPhotoItem() }
+            val (reviewed, activeCount) = withContext(Dispatchers.IO) {
+                (photoDao.getTotalReviewedCount() ?: 0L) to photoDao.getActivePhotoCount()
+            }
+            totalReviewedCount = reviewed
+            totalPhotosCount = activeCount
             reloadBatch(currentMode)
         }
 
@@ -744,14 +770,16 @@ class MainActivity : ComponentActivity() {
                         trashItems = trashItems,
                         onResolvePhotoItem = { photoId ->
                             withContext(Dispatchers.IO) {
-                                database.photoDao().getPhotoById(photoId)?.toPhotoItem()
+                                photoDao.getPhotoById(photoId)?.toPhotoItem()
                             }
                         },
                         onRestore = { photoIds ->
-                            coroutineScope.launch(Dispatchers.IO) {
+                            persistPhotoAction {
                                 val now = System.currentTimeMillis()
-                                database.photoDao().restoreFromTrashBatch(photoIds)
-                                database.photoDao().markViewedBatch(photoIds, now) // 赋予全新 24 小时绝对冷却保护期！
+                                photoDatabase.withTransaction {
+                                    photoDao.restoreFromTrashBatch(photoIds)
+                                    photoDao.markViewedBatch(photoIds, now)
+                                }
                             }
                         },
                         onPermanentDelete = { photoIds, uris ->
@@ -1089,14 +1117,19 @@ class MainActivity : ComponentActivity() {
                                         currentIndex = currentIndex,
                                         onClickPhoto = { photo ->
                                             HapticFeedback.click(this@MainActivity)
+                                            viewingZoomFocus = null
+                                            viewingPhoto = photo
+                                        },
+                                        onDoubleClickPhoto = { photo, focus ->
+                                            HapticFeedback.click(this@MainActivity)
+                                            viewingZoomFocus = focus
                                             viewingPhoto = photo
                                         },
                                         onSwipeLeft = { photo ->
                                             actionHistory.add(photo to CardSwipeAction.KEEP)
                                             currentIndex++
-                                            coroutineScope.launch(Dispatchers.IO) {
-                                                database.photoDao().markViewed(photo.id, System.currentTimeMillis())
-                                                totalReviewedCount = database.photoDao().getTotalReviewedCount() ?: 0L
+                                            persistPhotoAction {
+                                                photoDao.markViewed(photo.id, System.currentTimeMillis())
                                             }
                                         },
                                         onSwipeRight = {
@@ -1104,10 +1137,12 @@ class MainActivity : ComponentActivity() {
                                                 currentIndex--
                                                 val last = actionHistory.removeLastOrNull()
                                                 if (last != null && last.second == CardSwipeAction.DELETE) {
-                                                    coroutineScope.launch(Dispatchers.IO) {
+                                                    persistPhotoAction {
                                                         val now = System.currentTimeMillis()
-                                                        database.photoDao().restoreFromTrash(last.first.id)
-                                                        database.photoDao().markViewed(last.first.id, now)
+                                                        photoDatabase.withTransaction {
+                                                            photoDao.restoreFromTrash(last.first.id)
+                                                            photoDao.markViewed(last.first.id, now)
+                                                        }
                                                     }
                                                 }
                                             }
@@ -1115,17 +1150,18 @@ class MainActivity : ComponentActivity() {
                                         onSwipeUp = { photo ->
                                             actionHistory.add(photo to CardSwipeAction.DELETE)
                                             currentIndex++
-                                            coroutineScope.launch(Dispatchers.IO) {
-                                                database.photoDao().markViewed(photo.id, System.currentTimeMillis())
-                                                database.photoDao().moveToTrash(
-                                                    LocalTrashEntity(
-                                                        photoId = photo.id,
-                                                        uriString = photo.uri.toString(),
-                                                        size = photo.size,
-                                                        deletedAt = System.currentTimeMillis()
+                                            persistPhotoAction {
+                                                photoDatabase.withTransaction {
+                                                    photoDao.markViewed(photo.id, System.currentTimeMillis())
+                                                    photoDao.moveToTrash(
+                                                        LocalTrashEntity(
+                                                            photoId = photo.id,
+                                                            uriString = photo.uri.toString(),
+                                                            size = photo.size,
+                                                            deletedAt = System.currentTimeMillis()
+                                                        )
                                                     )
-                                                )
-                                                totalReviewedCount = database.photoDao().getTotalReviewedCount() ?: 0L
+                                                }
                                             }
                                         }
                                     )
@@ -1210,6 +1246,7 @@ class MainActivity : ComponentActivity() {
         viewingPhoto?.let { photo ->
             PhotoViewerOverlay(
                 photo = photo,
+                initialZoomFocus = viewingZoomFocus,
                 onDismiss = { viewingPhoto = null }
             )
         }

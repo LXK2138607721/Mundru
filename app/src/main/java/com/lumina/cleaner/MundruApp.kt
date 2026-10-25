@@ -7,6 +7,10 @@ import coil.ImageLoader
 import coil.ImageLoaderFactory
 import coil.decode.GifDecoder
 import coil.decode.ImageDecoderDecoder
+import com.lumina.cleaner.core.database.PhotoWriteQueue
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.SupervisorJob
 
 /**
  * Mundru 应用程序主入口 (Application)
@@ -19,6 +23,8 @@ import coil.decode.ImageDecoderDecoder
  * 4. 极速冷启动，无冗余 SDK 拦截。
  */
 class MundruApp : Application(), ImageLoaderFactory {
+    // Accepted database writes outlive Activity recreation; no UI work belongs to this scope.
+    internal val photoWrites = PhotoWriteQueue(CoroutineScope(SupervisorJob() + Dispatchers.IO))
 
     override fun onCreate() {
         super.onCreate()

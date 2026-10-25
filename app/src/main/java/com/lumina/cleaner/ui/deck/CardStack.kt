@@ -20,6 +20,7 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.scale
 import androidx.compose.ui.draw.shadow
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.input.pointer.util.VelocityTracker
@@ -56,7 +57,8 @@ fun CardStack(
     onSwipeRight: () -> Unit,
     onSwipeUp: (PhotoItem) -> Unit,
     onClickPhoto: (PhotoItem) -> Unit = {},
-    modifier: Modifier = Modifier
+    modifier: Modifier = Modifier,
+    onDoubleClickPhoto: (PhotoItem, Offset) -> Unit = { photo, _ -> onClickPhoto(photo) }
 ) {
     if (photos.isEmpty() || currentIndex >= photos.size) {
         return
@@ -249,7 +251,8 @@ fun CardStack(
         ) {
             DeckCard(
                 photo = currentPhoto,
-                onClick = { if (!isCommittingSwipe) onClickPhoto(currentPhoto) }
+                onClick = { if (!isCommittingSwipe) onClickPhoto(currentPhoto) },
+                onDoubleClick = { focus -> if (!isCommittingSwipe) onDoubleClickPhoto(currentPhoto, focus) }
             )
         }
 

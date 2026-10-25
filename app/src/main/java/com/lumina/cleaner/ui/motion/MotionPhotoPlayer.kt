@@ -19,6 +19,8 @@ import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.key
+import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.graphicsLayer
@@ -67,7 +69,34 @@ fun MotionPhotoPlayer(
     photoHeight: Int = 0,
     onPlaybackComplete: () -> Unit = {}
 ) {
+    // Stacked cards and an unopened LIVE photo must not allocate decoders or read media files.
+    key(imageUri, videoOffset, videoLength) {
+        var activated by remember { mutableStateOf(false) }
+        LaunchedEffect(isPlaying) {
+            if (isPlaying) activated = true
+        }
+        if (isPlaying || activated) {
+            ActiveMotionPhotoPlayer(imageUri, videoOffset, videoLength, modifier, isPlaying,
+                playAudio, scaleType, photoWidth, photoHeight, onPlaybackComplete)
+        }
+    }
+}
+
+@Composable
+private fun ActiveMotionPhotoPlayer(
+    imageUri: Uri,
+    videoOffset: Long,
+    videoLength: Long,
+    modifier: Modifier,
+    isPlaying: Boolean,
+    playAudio: Boolean,
+    scaleType: MotionScaleType,
+    photoWidth: Int,
+    photoHeight: Int,
+    onPlaybackComplete: () -> Unit
+) {
     val context = LocalContext.current
+    val currentOnComplete by rememberUpdatedState(onPlaybackComplete)
     var surface by remember { mutableStateOf<Surface?>(null) }
     var textureViewRef by remember { mutableStateOf<TextureView?>(null) }
     val mediaPlayer = remember { MediaPlayer() }
@@ -152,7 +181,7 @@ fun MotionPhotoPlayer(
                 try {
                     mediaPlayer.seekTo(0)
                 } catch (_: Exception) { }
-                onPlaybackComplete()
+                currentOnComplete()
             }
 
             mediaPlayer.setOnPreparedListener { player ->
@@ -164,10 +193,7 @@ fun MotionPhotoPlayer(
                     actualVideoHeight = vh
                     textureViewRef?.let { updateTextureTransform(it, vw, vh) }
                 }
-                if (isPlaying) {
-                    player.seekTo(0)
-                    player.start()
-                }
+                // LaunchedEffect(isPlaying, isPrepared) is the sole playback owner.
             }
 
             mediaPlayer.setOnErrorListener { _, _, _ -> true }
