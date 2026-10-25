@@ -16,12 +16,14 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.draw.shadow
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
@@ -33,6 +35,10 @@ import com.lumina.cleaner.core.model.PhotoItem
 import com.lumina.cleaner.core.util.HapticFeedback
 import com.lumina.cleaner.ui.motion.MotionPhotoPlayer
 import com.lumina.cleaner.ui.motion.MotionScaleType
+import com.lumina.cleaner.ui.viewer.PhotoTransform
+import kotlinx.coroutines.coroutineScope
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.launch
 
 /**
  * Mundru 核心相册卡片组件 (DeckCard)
@@ -52,9 +58,12 @@ fun DeckCard(
     photo: PhotoItem,
     onClick: () -> Unit = {},
     enableGestures: Boolean = true,
-    modifier: Modifier = Modifier
+    modifier: Modifier = Modifier,
+    onDoubleClick: ((Offset) -> Unit)? = null
 ) {
     val context = LocalContext.current
+    val currentOnClick by rememberUpdatedState(onClick)
+    val currentOnDoubleClick by rememberUpdatedState(onDoubleClick)
 
     // 点击播放单次标志
     var isLivePlaying by remember(photo.id) { mutableStateOf(false) }
@@ -77,13 +86,27 @@ fun DeckCard(
     val gestureModifier = if (enableGestures) {
         Modifier.pointerInput(photo.id) {
             detectTapGestures(
-                onTap = { onClick() },
+                onTap = { currentOnClick() },
+                onDoubleTap = onDoubleClick?.let { { position ->
+                    val focus = PhotoTransform.imageFocusFromCrop(position.x, position.y, photo.aspectRatio, size.width, size.height)
+                    currentOnDoubleClick?.invoke(Offset(focus.x, focus.y))
+                } },
+                onLongPress = if (photo.isLivePhoto && photo.motionVideoLength > 0) ({ _ -> }) else null,
                 onPress = {
                     if (photo.isLivePhoto && photo.motionVideoLength > 0 && !isLivePlaying) {
-                        HapticFeedback.tick(context)
-                        isLivePressing = true
-                        tryAwaitRelease()
-                        isLivePressing = false
+                        coroutineScope {
+                            val preview = launch {
+                                delay(viewConfiguration.longPressTimeoutMillis)
+                                HapticFeedback.tick(context)
+                                isLivePressing = true
+                            }
+                            try {
+                                tryAwaitRelease()
+                            } finally {
+                                preview.cancel()
+                                isLivePressing = false
+                            }
+                        }
                     }
                 }
             )

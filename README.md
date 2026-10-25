@@ -15,6 +15,14 @@
 
 ---
 
+## ✦ 最新版本：v1.1.1
+
+[下载安装包 Mundru.apk](https://github.com/LXK2138607721/Mundru/releases/download/v1.1.1/Mundru.apk) · [本次修复事项](CHANGELOG.md)
+
+修复相片冷却与抽样、Activity 重建时的操作保存，以及双击指令丢失和焦点偏移；减少重复解析与未播放实况照片的资源占用。现有界面和功能保持不变。本版完成代码审查、26 项 JVM 回归与签名 Release 检查，未进行真机实测。
+
+---
+
 ## ✦ 品牌寓意
 
 > **Mundru** 源自格陵兰语（Greenlandic），意为「**擦掉 / 擦除**」。
@@ -48,8 +56,8 @@ Mundru 摒弃了一切社交干扰、商业云推销与臃肿算法，回归相�
 - 整理卡片堆叠流与大图查看器中全自动循环播放，并附带专属极简紫色 `GIF` 状态徽标。
 
 ### 5. 🧭 四维智能抽样与专清引擎
-- **随机漫游（Random Walk）**：时间轴随机散步分桶 + 24 小时指数衰减冷却池，彻底告别重复翻看；
-- **时光胶囊（Time Capsule）**：跨越岁月之河，主动唤醒半年前的老照片与“那年今日”珍藏片段；
+- **随机漫游（Random Walk）**：均衡时间分层抽样 + 24 小时严格冷却，保护期内不重复推送已审阅照片；
+- **时光胶囊（Time Capsule）**：优先半年前的老照片与“那年今日”；没有半年老照片时，沿用至少 30 天前照片的降级规则；
 - **图集专清（Album Cleanup）**：按照片数量降序自动聚类系统图集，支持对膨胀相册开展靶向专清；
 - **月份专清（Month Cleanup）**：按历史年月时间轴无缝穿梭，专治某年某月的历史堆积。
 
@@ -100,7 +108,7 @@ app/src/main/java/com/lumina/cleaner/
 ├── domain/
 │   ├── album/             # 图集聚类与管理引擎 (AlbumManager)
 │   ├── motion/            # 原生零依赖实况解析器 (MotionPhotoParser, XMP/MP4 偏移量提取)
-│   └── sampling/          # 四维智能抽样引擎 (SamplingEngine, 24h 衰减冷却池)
+│   └── sampling/          # 四维智能抽样引擎 (SamplingEngine, 24h 严格冷却)
 ├── ui/
 │   ├── album/             # 图集专清与月份专清抽屉 (AlbumBottomSheet, MonthBottomSheet)
 │   ├── deck/              # 动力学卡片堆叠流 (CardStack, DeckCard, ModePill)
