@@ -15,11 +15,11 @@
 
 ---
 
-## ✦ 最新版本：v1.1.1
+## ✦ 最新版本：v1.2.0
 
-[下载安装包 Mundru.apk](https://github.com/LXK2138607721/Mundru/releases/download/v1.1.1/Mundru.apk) · [本次修复事项](CHANGELOG.md)
+[下载安装包 Mundru.apk](https://github.com/LXK2138607721/Mundru/releases/download/v1.2.0/Mundru.apk) · [本次更新事项](CHANGELOG.md)
 
-修复相片冷却与抽样、Activity 重建时的操作保存，以及双击指令丢失和焦点偏移；减少重复解析与未播放实况照片的资源占用。现有界面和功能保持不变。本版完成代码审查、26 项 JVM 回归与签名 Release 检查，未进行真机实测。
+选片更聪明、大图更丝滑：修复相片冷却与抽样、Activity 重建时的操作保存，以及双击指令丢失和焦点偏移；减少重复解析与未播放实况照片的资源占用。现有界面和功能保持不变。
 
 ---
 
