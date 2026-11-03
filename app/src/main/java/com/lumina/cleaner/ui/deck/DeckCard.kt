@@ -1,5 +1,7 @@
 package com.lumina.cleaner.ui.deck
 
+import android.os.Build
+import androidx.compose.foundation.background
 import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
@@ -24,9 +26,12 @@ import androidx.compose.ui.draw.clip
 import androidx.compose.ui.draw.shadow
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.geometry.Offset
+import androidx.compose.ui.graphics.asComposeRenderEffect
+import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
@@ -59,9 +64,13 @@ fun DeckCard(
     onClick: () -> Unit = {},
     enableGestures: Boolean = true,
     modifier: Modifier = Modifier,
-    onDoubleClick: ((Offset) -> Unit)? = null
+    onDoubleClick: ((Offset) -> Unit)? = null,
+    depthBlurRadiusDp: () -> Float = { 0f },
+    depthScrimAlpha: () -> Float = { 0f }
 ) {
     val context = LocalContext.current
+    val density = LocalDensity.current
+    val scrimColor = MaterialTheme.colorScheme.surfaceVariant
     val currentOnClick by rememberUpdatedState(onClick)
     val currentOnDoubleClick by rememberUpdatedState(onDoubleClick)
 
@@ -131,7 +140,29 @@ fun DeckCard(
             .clip(RoundedCornerShape(24.dp))
             .then(gestureModifier)
     ) {
-        Box(modifier = Modifier.fillMaxSize()) {
+        val contentBoxModifier = Modifier
+            .fillMaxSize()
+            .graphicsLayer {
+                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
+                    val blurDp = depthBlurRadiusDp()
+                    if (blurDp > 0.5f) {
+                        val blurPx = with(density) { blurDp.dp.toPx() }
+                        if (blurPx > 1f) {
+                            renderEffect = android.graphics.RenderEffect.createBlurEffect(
+                                blurPx,
+                                blurPx,
+                                android.graphics.Shader.TileMode.CLAMP
+                            ).asComposeRenderEffect()
+                        } else {
+                            renderEffect = null
+                        }
+                    } else {
+                        renderEffect = null
+                    }
+                }
+            }
+
+        Box(modifier = contentBoxModifier) {
             // 底层静态图片
             AsyncImage(
                 model = photo.uri,
@@ -174,7 +205,8 @@ fun DeckCard(
                             color = Color(0xFF6C5CE7).copy(alpha = 0.88f),
                             modifier = Modifier
                                 .clip(RoundedCornerShape(8.dp))
-                                .pointerInput(Unit) {
+                                .pointerInput(photo.id, enableGestures) {
+                                    if (!enableGestures) return@pointerInput
                                     detectTapGestures(
                                         onTap = {
                                             HapticFeedback.tick(context)
@@ -199,7 +231,8 @@ fun DeckCard(
                             color = Color.Black.copy(alpha = 0.65f),
                             modifier = Modifier
                                 .clip(RoundedCornerShape(8.dp))
-                                .pointerInput(Unit) {
+                                .pointerInput(photo.id, enableGestures) {
+                                    if (!enableGestures) return@pointerInput
                                     detectTapGestures(
                                         onTap = {
                                             HapticFeedback.tick(context)
@@ -228,7 +261,8 @@ fun DeckCard(
                             },
                             modifier = Modifier
                                 .clip(RoundedCornerShape(8.dp))
-                                .pointerInput(photo.id) {
+                                .pointerInput(photo.id, enableGestures) {
+                                    if (!enableGestures) return@pointerInput
                                     detectTapGestures(
                                         onTap = {
                                             HapticFeedback.click(context)
@@ -259,6 +293,18 @@ fun DeckCard(
                         }
                     }
                 }
+            }
+
+            // API 28~30 降级遮罩：仅在 Android 12 以下渲染，通过动态 alpha 降低对比度，不拦截事件
+            if (Build.VERSION.SDK_INT < Build.VERSION_CODES.S) {
+                Box(
+                    modifier = Modifier
+                        .fillMaxSize()
+                        .graphicsLayer {
+                            alpha = depthScrimAlpha().coerceIn(0f, 1f)
+                        }
+                        .background(scrimColor)
+                )
             }
         }
     }

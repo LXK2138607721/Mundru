@@ -15,11 +15,11 @@
 
 ---
 
-## ✦ 最新版本：v1.2.0
+## ✦ 最新版本：v1.3.0
 
-[下载安装包 Mundru.apk](https://github.com/LXK2138607721/Mundru/releases/download/v1.2.0/Mundru.apk) · [本次更新事项](CHANGELOG.md)
+[下载安装包 Mundru.apk](https://github.com/LXK2138607721/Mundru/releases/download/v1.3.0/Mundru.apk) · [本次更新事项](CHANGELOG.md)
 
-选片更聪明、大图更丝滑：修复相片冷却与抽样、Activity 重建时的操作保存，以及双击指令丢失和焦点偏移；减少重复解析与未播放实况照片的资源占用。现有界面和功能保持不变。
+卡片层次更清楚：后方照片随滑动逐渐变清晰。修复快速变向、松手和回弹接管时的跳动，以及底层卡片徽标误响应点击的问题。保留原有布局、整理模式和操作方式。
 
 ---
 

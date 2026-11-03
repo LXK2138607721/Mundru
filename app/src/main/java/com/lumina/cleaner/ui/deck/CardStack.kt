@@ -7,9 +7,10 @@ import androidx.compose.foundation.gestures.detectDragGestures
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
-import androidx.compose.foundation.layout.offset
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -17,10 +18,8 @@ import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.draw.scale
-import androidx.compose.ui.draw.shadow
-import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.geometry.Offset
+import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.input.pointer.util.VelocityTracker
@@ -30,13 +29,15 @@ import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.unit.dp
 import com.lumina.cleaner.core.model.PhotoItem
 import com.lumina.cleaner.core.util.HapticFeedback
-import kotlinx.coroutines.launch
 import kotlin.math.abs
 
 enum class CardSwipeAction {
     KEEP,
     DELETE
 }
+
+// 稳定对象复用（解决 G5：避免在每帧 graphicsLayer 中重复分配 Shape）
+private val CardCornerShape = RoundedCornerShape(24.dp)
 
 /**
  * Mundru 卡片主舞台 (CardStack)
@@ -89,8 +90,17 @@ fun CardStack(
 
     val animOffsetX = remember(currentPhoto.id) { Animatable(0f) }
     val animOffsetY = remember(currentPhoto.id) { Animatable(0f) }
+    val animDepthProgress = remember(currentPhoto.id) { Animatable(0f) }
     var hasTriggeredThresholdHaptic by remember(currentPhoto.id) { mutableStateOf(false) }
-    var isCommittingSwipe by remember(currentPhoto.id) { mutableStateOf(false) }
+
+    // 生产环境手势协同器：持有真实生命周期，管理双动画协调、照片身份守卫、逻辑坐标同步与景深连续过渡
+    val coordinator = remember { DeckGestureCoordinator(coroutineScope) }
+
+    // 照片身份变更守卫：当当前照片变化时，立即取消旧照片的所有活跃任务并重置代次 (Fix F1)
+    LaunchedEffect(currentPhoto.id) {
+        coordinator.bindPhoto(currentPhoto.id)
+        hasTriggeredThresholdHaptic = false
+    }
 
     Box(
         modifier = modifier
@@ -98,28 +108,54 @@ fun CardStack(
             .padding(horizontal = horizontalPaddingDp),
         contentAlignment = Alignment.Center
     ) {
-        // 底层第三张卡片
+        // 底层第三张卡片（更深景深，随前进平滑微张与上浮）
         if (thirdPhoto != null) {
-            DeckCard(
-                photo = thirdPhoto,
-                enableGestures = false,
+            Box(
                 modifier = Modifier
                     .fillMaxWidth()
-                    .offset(y = 28.dp)
-                    .scale(0.90f)
-            )
+                    .graphicsLayer {
+                        val metrics = DeckDepthModel.interpolateThirdLayer(animDepthProgress.value)
+                        scaleX = metrics.scale
+                        scaleY = metrics.scale
+                        translationY = with(density) { metrics.offsetYDp.dp.toPx() }
+                    }
+            ) {
+                DeckCard(
+                    photo = thirdPhoto,
+                    enableGestures = false,
+                    depthBlurRadiusDp = {
+                        DeckDepthModel.interpolateThirdLayer(animDepthProgress.value).blurDp
+                    },
+                    depthScrimAlpha = {
+                        DeckDepthModel.interpolateThirdLayer(animDepthProgress.value).scrimAlpha
+                    }
+                )
+            }
         }
 
-        // 底层第二张候选卡片
+        // 底层第二张候选卡片（随手势前进平滑放大、上浮、变清晰）
         if (nextPhoto != null) {
-            DeckCard(
-                photo = nextPhoto,
-                enableGestures = false,
+            Box(
                 modifier = Modifier
                     .fillMaxWidth()
-                    .offset(y = 14.dp)
-                    .scale(0.95f)
-            )
+                    .graphicsLayer {
+                        val metrics = DeckDepthModel.interpolateSecondLayer(animDepthProgress.value)
+                        scaleX = metrics.scale
+                        scaleY = metrics.scale
+                        translationY = with(density) { metrics.offsetYDp.dp.toPx() }
+                    }
+            ) {
+                DeckCard(
+                    photo = nextPhoto,
+                    enableGestures = false,
+                    depthBlurRadiusDp = {
+                        DeckDepthModel.interpolateSecondLayer(animDepthProgress.value).blurDp
+                    },
+                    depthScrimAlpha = {
+                        DeckDepthModel.interpolateSecondLayer(animDepthProgress.value).scrimAlpha
+                    }
+                )
+            }
         }
 
         // 当前居中卡片（接收主手势操作）
@@ -136,114 +172,174 @@ fun CardStack(
                     val velocityTracker = VelocityTracker()
                     detectDragGestures(
                         onDragStart = {
-                            if (isCommittingSwipe) return@detectDragGestures
+                            if (coordinator.isCommittingSwipe) return@detectDragGestures
                             velocityTracker.resetTracking()
+                            coordinator.onDragStart(
+                                initialX = animOffsetX.value,
+                                initialY = animOffsetY.value,
+                                hThreshold = horizontalThreshold,
+                                vThreshold = verticalThreshold,
+                                initialDepth = animDepthProgress.value
+                            )
                         },
                         onDragEnd = {
-                            if (isCommittingSwipe) return@detectDragGestures
-                            coroutineScope.launch {
-                                val dx = animOffsetX.value
-                                val dy = animOffsetY.value
-                                val velocity = velocityTracker.calculateVelocity()
-                                val vx = velocity.x
-                                val vy = velocity.y
+                            if (coordinator.isCommittingSwipe) return@detectDragGestures
+                            coordinator.onDragEnd()
 
-                                val isFastUp = vy < -350f && dy < -18f
-                                val isFastRight = vx > 450f && dx > 25f
-                                val isFastLeft = vx < -450f && dx < -25f
+                            val dx = coordinator.dragLogicalX
+                            val dy = coordinator.dragLogicalY
+                            val velocity = velocityTracker.calculateVelocity()
+                            val vx = velocity.x
+                            val vy = velocity.y
 
-                                val commitSpring = spring<Float>(
-                                    dampingRatio = 0.86f,
-                                    stiffness = Spring.StiffnessMedium
-                                )
+                            // 解决 G1：裁决绝对采用最新的手势逻辑位移与速度，不依赖排队中的协程
+                            val action = coordinator.resolveReleaseAction(
+                                vx = vx,
+                                vy = vy,
+                                hThreshold = horizontalThreshold,
+                                vThreshold = verticalThreshold,
+                                hasPreviousPhoto = currentIndex > 0 && prevPhoto != null
+                            )
 
-                                when {
-                                    // 右滑：查看上一张照片（丝滑拉满衔接）
-                                    (dx > horizontalThreshold || isFastRight) && abs(dx) >= abs(dy) * 0.6f -> {
-                                        if (currentIndex > 0 && prevPhoto != null) {
-                                            isCommittingSwipe = true
-                                            HapticFeedback.click(context)
-                                            // 目标位移让上一张卡片完美推进至屏幕正中心 (translationX = 0)
-                                            val targetRightExit = -hiddenBaseOffset
-                                            animOffsetX.animateTo(targetRightExit, commitSpring)
-                                            onSwipeRight()
-                                        } else {
-                                            // 首张无上一张照片，物理回弹与轻微触觉提示
-                                            hasTriggeredThresholdHaptic = false
-                                            HapticFeedback.tick(context)
-                                            val softSpring = spring<Float>(
-                                                dampingRatio = Spring.DampingRatioNoBouncy,
-                                                stiffness = 260f
-                                            )
-                                            launch { animOffsetX.animateTo(0f, softSpring) }
-                                            launch { animOffsetY.animateTo(0f, softSpring) }
-                                        }
-                                    }
-                                    // 左滑：保留并进入下一张照片
-                                    (dx < -horizontalThreshold || isFastLeft) && abs(dx) >= abs(dy) * 0.6f -> {
-                                        isCommittingSwipe = true
-                                        HapticFeedback.click(context)
-                                        animOffsetX.animateTo(-screenWidthPx * 1.5f, commitSpring)
-                                        onSwipeLeft(currentPhoto)
-                                    }
-                                    // 上滑：移入回收站（包容单手斜推生理角度）
-                                    (dy < -verticalThreshold || isFastUp) && abs(dy) >= abs(dx) * 0.65f -> {
-                                        isCommittingSwipe = true
-                                        HapticFeedback.heavy(context)
-                                        animOffsetY.animateTo(-screenHeightPx, commitSpring)
-                                        onSwipeUp(currentPhoto)
-                                    }
-                                    else -> {
-                                        hasTriggeredThresholdHaptic = false
-                                        val softSpring = spring<Float>(
-                                            dampingRatio = Spring.DampingRatioNoBouncy,
-                                            stiffness = 260f
-                                        )
-                                        launch { animOffsetX.animateTo(0f, softSpring) }
-                                        launch { animOffsetY.animateTo(0f, softSpring) }
-                                    }
+                            val commitSpring = spring<Float>(
+                                dampingRatio = 0.86f,
+                                stiffness = Spring.StiffnessMedium
+                            )
+                            val softSpring = spring<Float>(
+                                dampingRatio = Spring.DampingRatioNoBouncy,
+                                stiffness = 260f
+                            )
+
+                            when (action) {
+                                // 右滑：查看上一张照片（并发协同等待位移与景深动画到达终点，带身份与代次守卫）
+                                ReleaseAction.COMMIT_RIGHT -> {
+                                    HapticFeedback.click(context)
+                                    val targetRightExit = -hiddenBaseOffset
+                                    coordinator.commitSwipe(
+                                        commitSpring = commitSpring,
+                                        animDepthProgress = animDepthProgress,
+                                        animOffset = animOffsetX,
+                                        targetOffset = targetRightExit,
+                                        targetDepthP = 0f,
+                                        startOffset = dx,
+                                        onCommitSuccess = onSwipeRight
+                                    )
+                                }
+                                // 首张无上一张照片，物理回弹与轻微触觉提示
+                                ReleaseAction.BOUNCE_RIGHT_FIRST -> {
+                                    hasTriggeredThresholdHaptic = false
+                                    HapticFeedback.tick(context)
+                                    coordinator.bounceBack(
+                                        softSpring = softSpring,
+                                        animDepthProgress = animDepthProgress,
+                                        animOffsetX = animOffsetX,
+                                        animOffsetY = animOffsetY,
+                                        startOffsetX = dx,
+                                        startOffsetY = dy
+                                    )
+                                }
+                                // 左滑：保留并进入下一张照片（并发协同等待景深推进至 1f 终点）
+                                ReleaseAction.COMMIT_LEFT -> {
+                                    HapticFeedback.click(context)
+                                    coordinator.commitSwipe(
+                                        commitSpring = commitSpring,
+                                        animDepthProgress = animDepthProgress,
+                                        animOffset = animOffsetX,
+                                        targetOffset = -screenWidthPx * 1.5f,
+                                        targetDepthP = 1f,
+                                        startOffset = dx,
+                                        onCommitSuccess = { onSwipeLeft(currentPhoto) }
+                                    )
+                                }
+                                // 上滑：移入回收站（并发协同等待景深推进至 1f 终点）
+                                ReleaseAction.COMMIT_UP -> {
+                                    HapticFeedback.heavy(context)
+                                    coordinator.commitSwipe(
+                                        commitSpring = commitSpring,
+                                        animDepthProgress = animDepthProgress,
+                                        animOffset = animOffsetY,
+                                        targetOffset = -screenHeightPx,
+                                        targetDepthP = 1f,
+                                        startOffset = dy,
+                                        onCommitSuccess = { onSwipeUp(currentPhoto) }
+                                    )
+                                }
+                                // 未达阈值回弹：景深与位移平滑协同退回 0f
+                                ReleaseAction.BOUNCE -> {
+                                    hasTriggeredThresholdHaptic = false
+                                    coordinator.bounceBack(
+                                        softSpring = softSpring,
+                                        animDepthProgress = animDepthProgress,
+                                        animOffsetX = animOffsetX,
+                                        animOffsetY = animOffsetY,
+                                        startOffsetX = dx,
+                                        startOffsetY = dy
+                                    )
                                 }
                             }
                         },
                         onDragCancel = {
-                            if (isCommittingSwipe) return@detectDragGestures
-                            coroutineScope.launch {
-                                hasTriggeredThresholdHaptic = false
-                                val softSpring = spring<Float>(
-                                    dampingRatio = Spring.DampingRatioNoBouncy,
-                                    stiffness = 260f
-                                )
-                                launch { animOffsetX.animateTo(0f, softSpring) }
-                                launch { animOffsetY.animateTo(0f, softSpring) }
-                            }
+                            if (coordinator.isCommittingSwipe) return@detectDragGestures
+                            hasTriggeredThresholdHaptic = false
+                            val dx = coordinator.dragLogicalX
+                            val dy = coordinator.dragLogicalY
+                            coordinator.onDragEnd()
+                            val softSpring = spring<Float>(
+                                dampingRatio = Spring.DampingRatioNoBouncy,
+                                stiffness = 260f
+                            )
+                            coordinator.bounceBack(
+                                softSpring = softSpring,
+                                animDepthProgress = animDepthProgress,
+                                animOffsetX = animOffsetX,
+                                animOffsetY = animOffsetY,
+                                startOffsetX = dx,
+                                startOffsetY = dy
+                            )
                         },
                         onDrag = { change, dragAmount ->
-                            if (isCommittingSwipe) return@detectDragGestures
+                            if (coordinator.isCommittingSwipe) return@detectDragGestures
                             change.consume()
                             velocityTracker.addPosition(change.uptimeMillis, change.position)
-                            coroutineScope.launch {
-                                val currentX = animOffsetX.value
-                                // 首张照片向右滑施加阻尼保护
-                                val effectiveDragX = if (currentIndex == 0 && (currentX + dragAmount.x) > 0f) {
-                                    dragAmount.x * 0.28f
-                                } else {
-                                    dragAmount.x
-                                }
 
-                                val newX = currentX + effectiveDragX
-                                val newY = animOffsetY.value + dragAmount.y
-                                animOffsetX.snapTo(newX)
-                                animOffsetY.snapTo(newY)
+                            val currentLogicalX = coordinator.dragLogicalX
+                            // 首张照片向右滑施加阻尼保护
+                            val effectiveDragX = if (currentIndex == 0 && (currentLogicalX + dragAmount.x) > 0f) {
+                                dragAmount.x * 0.28f
+                            } else {
+                                dragAmount.x
+                            }
 
-                                val reachedThreshold = (newX > horizontalThreshold && currentIndex > 0) ||
-                                        (newX < -horizontalThreshold) ||
-                                        (newY < -verticalThreshold && abs(newY) >= abs(newX) * 0.65f)
-                                if (reachedThreshold && !hasTriggeredThresholdHaptic) {
-                                    hasTriggeredThresholdHaptic = true
-                                    HapticFeedback.tick(context)
-                                } else if (!reachedThreshold && hasTriggeredThresholdHaptic) {
-                                    hasTriggeredThresholdHaptic = false
-                                }
+                            val newX = currentLogicalX + effectiveDragX
+                            val newY = coordinator.dragLogicalY + dragAmount.y
+
+                            // 1. 同步记录手势逻辑位移并更新景深连续过渡（解决 G1 与 G2）
+                            coordinator.onDragUpdate(
+                                newX = newX,
+                                newY = newY,
+                                hThreshold = horizontalThreshold,
+                                vThreshold = verticalThreshold,
+                                animDepthProgress = animDepthProgress,
+                                updateJobScope = coroutineScope
+                            )
+
+                            // 2. 异步更新展示位移（带代次与拖拽状态校验保护）
+                            coordinator.updateVisualOffset(
+                                targetX = newX,
+                                targetY = newY,
+                                animOffsetX = animOffsetX,
+                                animOffsetY = animOffsetY,
+                                updateJobScope = coroutineScope
+                            )
+
+                            val reachedThreshold = (newX > horizontalThreshold && currentIndex > 0) ||
+                                    (newX < -horizontalThreshold) ||
+                                    (newY < -verticalThreshold && abs(newY) >= abs(newX) * 0.65f)
+                            if (reachedThreshold && !hasTriggeredThresholdHaptic) {
+                                hasTriggeredThresholdHaptic = true
+                                HapticFeedback.tick(context)
+                            } else if (!reachedThreshold && hasTriggeredThresholdHaptic) {
+                                hasTriggeredThresholdHaptic = false
                             }
                         }
                     )
@@ -251,28 +347,27 @@ fun CardStack(
         ) {
             DeckCard(
                 photo = currentPhoto,
-                onClick = { if (!isCommittingSwipe) onClickPhoto(currentPhoto) },
-                onDoubleClick = { focus -> if (!isCommittingSwipe) onDoubleClickPhoto(currentPhoto, focus) }
+                onClick = { if (!coordinator.isCommittingSwipe) onClickPhoto(currentPhoto) },
+                onDoubleClick = { focus -> if (!coordinator.isCommittingSwipe) onDoubleClickPhoto(currentPhoto, focus) }
             )
         }
 
         // 上一张卡片：常驻挂载以预加载图片 Bitmap，并在右滑时根据手指位移从屏幕左侧 1:1 跟手拉出
         if (prevPhoto != null) {
-            val isSwipingRight = animOffsetX.value > 0f
             Box(
                 modifier = Modifier
                     .fillMaxWidth()
                     .graphicsLayer {
                         val offsetX = hiddenBaseOffset + animOffsetX.value
                         translationX = offsetX
-                        // 右滑时完全不透明呈现，非右滑时微量透明度保留组合以维持 Coil Bitmap 预热
+                        val isSwipingRight = animOffsetX.value > 0f
                         alpha = if (isSwipingRight) 1f else 0.001f
+                        shadowElevation = if (isSwipingRight) with(density) { 16.dp.toPx() } else 0f
+                        ambientShadowColor = Color.Black.copy(alpha = 0.08f)
+                        spotShadowColor = Color.Black.copy(alpha = 0.18f)
+                        shape = CardCornerShape
+                        clip = false
                     }
-                    .shadow(
-                        elevation = if (isSwipingRight) 16.dp else 0.dp,
-                        ambientColor = Color.Black.copy(alpha = 0.08f),
-                        spotColor = Color.Black.copy(alpha = 0.18f)
-                    )
             ) {
                 DeckCard(
                     photo = prevPhoto,
