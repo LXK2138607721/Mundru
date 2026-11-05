@@ -81,6 +81,10 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.core.content.ContextCompat
+import androidx.lifecycle.Lifecycle
+import androidx.lifecycle.repeatOnLifecycle
+import com.lumina.cleaner.domain.album.activeLibraryCount
+import com.lumina.cleaner.domain.album.visibleImageIds
 import androidx.lifecycle.lifecycleScope
 import androidx.room.withTransaction
 import com.lumina.cleaner.core.database.LocalTrashEntity
@@ -313,6 +317,7 @@ class MainActivity : ComponentActivity() {
 
     override fun onResume() {
         super.onResume()
+        updatePermissionStatus()
         isAppPaused = false
         applySecurityFlags(isBackgroundBlurEnabled)
     }
@@ -501,7 +506,6 @@ class MainActivity : ComponentActivity() {
 
         // 统计数据状态
         var totalReviewedCount by remember { mutableLongStateOf(0L) }
-        var totalPhotosCount by remember { mutableIntStateOf(0) }
         var isBatchInCooldown by remember { mutableStateOf(false) }
 
         // 历史操作栈（用于右滑上一张与回溯撤回）
@@ -652,11 +656,7 @@ class MainActivity : ComponentActivity() {
             }
             synchronized.join()
             allLibraryPhotos = synchronizedEntities.map { it.toPhotoItem() }
-            val (reviewed, activeCount) = withContext(Dispatchers.IO) {
-                (photoDao.getTotalReviewedCount() ?: 0L) to photoDao.getActivePhotoCount()
-            }
-            totalReviewedCount = reviewed
-            totalPhotosCount = activeCount
+            totalReviewedCount = withContext(Dispatchers.IO) { photoDao.getTotalReviewedCount() ?: 0L }
             reloadBatch(currentMode)
         }
 
@@ -727,6 +727,16 @@ class MainActivity : ComponentActivity() {
         ) { screen ->
             when (screen) {
                 ActiveScreen.SETTINGS -> {
+                    var liveIds by remember { mutableStateOf<Set<Long>?>(null) }
+                    LaunchedEffect(Unit) {
+                        lifecycle.repeatOnLifecycle(Lifecycle.State.RESUMED) {
+                            contentResolver.visibleImageIds().collect { liveIds = it }
+                        }
+                    }
+                    val visibleIds = liveIds ?: remember(allLibraryPhotos) { allLibraryPhotos.mapTo(HashSet()) { it.id } }
+                    val totalPhotosCount = remember(visibleIds, trashItems) {
+                        activeLibraryCount(visibleIds, trashItems.map { it.photoId })
+                    }
                     SettingsScreen(
                         currentBatchSize = currentBatchSize,
                         onBatchSizeChange = { newSize ->

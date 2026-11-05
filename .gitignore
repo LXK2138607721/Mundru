@@ -12,6 +12,14 @@ app/build/
 
 # Local SDK and environment properties
 local.properties
+# Signing material is kept outside the source tree; only public certificates may be shared.
+*.jks
+*.keystore
+*.p12
+*.pfx
+*.pk8
+keystore.properties
+signing.properties
 .idea/
 *.iml
 .DS_Store

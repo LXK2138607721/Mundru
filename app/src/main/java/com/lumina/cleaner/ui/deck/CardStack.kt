@@ -23,6 +23,8 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.input.pointer.util.VelocityTracker
+import androidx.compose.ui.layout.LayoutCoordinates
+import androidx.compose.ui.layout.onPlaced
 import androidx.compose.ui.platform.LocalConfiguration
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalDensity
@@ -47,7 +49,7 @@ private val CardCornerShape = RoundedCornerShape(24.dp)
  * 核心交互与手感升级：
  * 1. 实时跟手右滑：当用户按住屏幕右滑不松手时，上一张照片根据拖拽距离 1:1 从屏幕左边缘跟手拉出；
  * 2. 预加载零延迟：上一张照片常驻挂载预加载 Bitmap 纹理，彻底根除右滑时的卡顿感与延迟显示；
- * 3. 丝滑物理衔接：右滑松手后弹簧动画无缝推进上一张照片入驻正中央，状态切换零跳变；
+ * 3. 右滑交接：当前照片收拢、滑入上一张下方，再展开至第二层大小后交接索引；
  * 4. 左滑与上滑手感保持轻快利落，首张照片右滑阻尼保护。
  */
 @Composable
@@ -91,6 +93,9 @@ fun CardStack(
     val animOffsetX = remember(currentPhoto.id) { Animatable(0f) }
     val animOffsetY = remember(currentPhoto.id) { Animatable(0f) }
     val animDepthProgress = remember(currentPhoto.id) { Animatable(0f) }
+    val animReturnProgress = remember(currentPhoto.id) { Animatable(0f) }
+    var inputLayout by remember { mutableStateOf<LayoutCoordinates?>(null) }
+    var returnStart by remember(currentPhoto.id) { mutableStateOf<DeckReturnStart?>(null) }
     var hasTriggeredThresholdHaptic by remember(currentPhoto.id) { mutableStateOf(false) }
 
     // 生产环境手势协同器：持有真实生命周期，管理双动画协调、照片身份守卫、逻辑坐标同步与景深连续过渡
@@ -101,6 +106,10 @@ fun CardStack(
         coordinator.bindPhoto(currentPhoto.id)
         hasTriggeredThresholdHaptic = false
     }
+
+    fun nextLayerMetrics(): DeckDepthMetrics = returnStart?.let {
+        DeckReturnModel.nextLayer(animReturnProgress.value, it.depth)
+    } ?: DeckDepthModel.interpolateSecondLayer(animDepthProgress.value)
 
     Box(
         modifier = modifier
@@ -118,6 +127,7 @@ fun CardStack(
                         scaleX = metrics.scale
                         scaleY = metrics.scale
                         translationY = with(density) { metrics.offsetYDp.dp.toPx() }
+                        alpha = if (returnStart != null) DeckReturnModel.thirdAlpha(animReturnProgress.value) else 1f
                     }
             ) {
                 DeckCard(
@@ -139,7 +149,7 @@ fun CardStack(
                 modifier = Modifier
                     .fillMaxWidth()
                     .graphicsLayer {
-                        val metrics = DeckDepthModel.interpolateSecondLayer(animDepthProgress.value)
+                        val metrics = nextLayerMetrics()
                         scaleX = metrics.scale
                         scaleY = metrics.scale
                         translationY = with(density) { metrics.offsetYDp.dp.toPx() }
@@ -149,10 +159,10 @@ fun CardStack(
                     photo = nextPhoto,
                     enableGestures = false,
                     depthBlurRadiusDp = {
-                        DeckDepthModel.interpolateSecondLayer(animDepthProgress.value).blurDp
+                        nextLayerMetrics().blurDp
                     },
                     depthScrimAlpha = {
-                        DeckDepthModel.interpolateSecondLayer(animDepthProgress.value).scrimAlpha
+                        nextLayerMetrics().scrimAlpha
                     }
                 )
             }
@@ -163,12 +173,25 @@ fun CardStack(
             modifier = Modifier
                 .fillMaxWidth()
                 .graphicsLayer {
-                    translationX = animOffsetX.value
-                    translationY = animOffsetY.value
-                    // 左滑轻快倾斜，右滑保持稳定水平推移
-                    rotationZ = if (animOffsetX.value < 0) animOffsetX.value * 0.035f else animOffsetX.value * 0.012f
+                    val returning = returnStart
+                    if (returning != null) {
+                        val frame = DeckReturnModel.currentCard(animReturnProgress.value, returning, density.density)
+                        scaleX = frame.scale
+                        scaleY = frame.scale
+                        translationX = frame.x
+                        translationY = frame.y
+                        rotationZ = frame.rotation
+                    } else {
+                        scaleX = 1f
+                        scaleY = 1f
+                        translationX = animOffsetX.value
+                        translationY = animOffsetY.value
+                        // 左滑轻快倾斜，右滑保持稳定水平推移
+                        rotationZ = if (animOffsetX.value < 0) animOffsetX.value * 0.035f else animOffsetX.value * 0.012f
+                    }
                 }
-                .pointerInput(currentPhoto.id) {
+                .onPlaced { inputLayout = it }
+                .pointerInput(currentPhoto.id, horizontalThreshold, verticalThreshold) {
                     val velocityTracker = VelocityTracker()
                     detectDragGestures(
                         onDragStart = {
@@ -211,17 +234,13 @@ fun CardStack(
                             )
 
                             when (action) {
-                                // 右滑：查看上一张照片（并发协同等待位移与景深动画到达终点，带身份与代次守卫）
+                                // 从当前显示帧开始收拢和归位，不再将本张向右移出后瞬移回底层。
                                 ReleaseAction.COMMIT_RIGHT -> {
                                     HapticFeedback.click(context)
-                                    val targetRightExit = -hiddenBaseOffset
-                                    coordinator.commitSwipe(
-                                        commitSpring = commitSpring,
-                                        animDepthProgress = animDepthProgress,
-                                        animOffset = animOffsetX,
-                                        targetOffset = targetRightExit,
-                                        targetDepthP = 0f,
-                                        startOffset = dx,
+                                    returnStart = DeckReturnModel.capture(animOffsetX.value, animOffsetY.value,
+                                        animDepthProgress.value, vx, vy, horizontalThreshold)
+                                    coordinator.commitReturn(
+                                        progress = animReturnProgress,
                                         onCommitSuccess = onSwipeRight
                                     )
                                 }
@@ -299,19 +318,21 @@ fun CardStack(
                         },
                         onDrag = { change, dragAmount ->
                             if (coordinator.isCommittingSwipe) return@detectDragGestures
+                            val layout = inputLayout ?: return@detectDragGestures
+                            val sample = deckDragSample(change.position, dragAmount, layout::localToRoot)
                             change.consume()
-                            velocityTracker.addPosition(change.uptimeMillis, change.position)
+                            velocityTracker.addPosition(change.uptimeMillis, sample.position)
 
                             val currentLogicalX = coordinator.dragLogicalX
                             // 首张照片向右滑施加阻尼保护
-                            val effectiveDragX = if (currentIndex == 0 && (currentLogicalX + dragAmount.x) > 0f) {
-                                dragAmount.x * 0.28f
+                            val effectiveDragX = if (currentIndex == 0 && (currentLogicalX + sample.delta.x) > 0f) {
+                                sample.delta.x * 0.28f
                             } else {
-                                dragAmount.x
+                                sample.delta.x
                             }
 
                             val newX = currentLogicalX + effectiveDragX
-                            val newY = coordinator.dragLogicalY + dragAmount.y
+                            val newY = coordinator.dragLogicalY + sample.delta.y
 
                             // 1. 同步记录手势逻辑位移并更新景深连续过渡（解决 G1 与 G2）
                             coordinator.onDragUpdate(
@@ -347,8 +368,24 @@ fun CardStack(
         ) {
             DeckCard(
                 photo = currentPhoto,
+                smoothOutline = true,
+                cacheMovingCard = returnStart == null,
+                // 在拖动检测器内侧缩放内容，避免缩小照片也缩小拖动命中区域。
+                modifier = Modifier.graphicsLayer {
+                    val s = if (prevPhoto != null && returnStart == null)
+                        DeckReturnModel.dragScale(animOffsetX.value, animOffsetY.value, horizontalThreshold) else 1f
+                    scaleX = s
+                    scaleY = s
+                },
+                enableGestures = returnStart == null,
                 onClick = { if (!coordinator.isCommittingSwipe) onClickPhoto(currentPhoto) },
-                onDoubleClick = { focus -> if (!coordinator.isCommittingSwipe) onDoubleClickPhoto(currentPhoto, focus) }
+                onDoubleClick = { focus -> if (!coordinator.isCommittingSwipe) onDoubleClickPhoto(currentPhoto, focus) },
+                depthBlurRadiusDp = {
+                    if (returnStart == null) 0f else DeckReturnModel.blurDp(animReturnProgress.value)
+                },
+                depthScrimAlpha = {
+                    if (returnStart == null) 0f else DeckReturnModel.scrimAlpha(animReturnProgress.value)
+                }
             )
         }
 
@@ -358,11 +395,18 @@ fun CardStack(
                 modifier = Modifier
                     .fillMaxWidth()
                     .graphicsLayer {
-                        val offsetX = hiddenBaseOffset + animOffsetX.value
-                        translationX = offsetX
-                        val isSwipingRight = animOffsetX.value > 0f
-                        alpha = if (isSwipingRight) 1f else 0.001f
-                        shadowElevation = if (isSwipingRight) with(density) { 16.dp.toPx() } else 0f
+                        val returning = returnStart
+                        if (returning != null) {
+                            val progress = animReturnProgress.value
+                            translationX = DeckReturnModel.previousX(progress, hiddenBaseOffset + returning.x, returning.vx)
+                            alpha = DeckReturnModel.previousAlpha(progress, returning)
+                            shadowElevation = with(density) { DeckReturnModel.previousShadowDp(progress, returning).dp.toPx() }
+                        } else {
+                            translationX = hiddenBaseOffset + animOffsetX.value
+                            val isSwipingRight = animOffsetX.value > 0f
+                            alpha = if (isSwipingRight) 1f else 0.001f
+                            shadowElevation = if (isSwipingRight) with(density) { 16.dp.toPx() } else 0f
+                        }
                         ambientShadowColor = Color.Black.copy(alpha = 0.08f)
                         spotShadowColor = Color.Black.copy(alpha = 0.18f)
                         shape = CardCornerShape
@@ -371,6 +415,7 @@ fun CardStack(
             ) {
                 DeckCard(
                     photo = prevPhoto,
+                    cacheMovingCard = true,
                     enableGestures = false,
                     onClick = {}
                 )

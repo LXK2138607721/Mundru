@@ -32,12 +32,6 @@ interface PhotoDao {
     suspend fun getAllPhotosSync(): List<PhotoEntity>
 
     /**
-     * 获取当前有效相片总数（排除回收站暂存项）
-     */
-    @Query("SELECT COUNT(*) FROM photos WHERE id NOT IN (SELECT photoId FROM local_trash)")
-    suspend fun getActivePhotoCount(): Int
-
-    /**
      * 获取累计审阅浏览相片总次数
      */
     @Query("SELECT SUM(viewCount) FROM photos")

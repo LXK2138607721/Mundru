@@ -9,6 +9,7 @@ import androidx.compose.runtime.MonotonicFrameClock
 import com.lumina.cleaner.core.model.PhotoItem
 import kotlinx.coroutines.CancellableContinuation
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.job
 import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.suspendCancellableCoroutine
 import kotlinx.coroutines.withContext
@@ -28,7 +29,7 @@ import kotlin.math.abs
  * 解决 G3：一次推进 (advanceFrame) 赋予当帧所有等待者完全相同的时间戳，
  * 配合调度器排空 (drainDispatchers)，彻底消除多协程时间漂移与任意 delay 猜测。
  */
-private class ManualFrameClock : MonotonicFrameClock {
+private class ManualFrameClock(private val frameNanos: Long = 16_000_000L) : MonotonicFrameClock {
     private val waiters = mutableListOf<CancellableContinuation<Long>>()
     var timeNanos: Long = 0L
         private set
@@ -39,7 +40,7 @@ private class ManualFrameClock : MonotonicFrameClock {
     }
 
     fun advanceFrame() {
-        timeNanos += 16_000_000L
+        timeNanos += frameNanos
         val pending = waiters.toList()
         waiters.clear()
         pending.forEach { if (it.isActive) it.resume(timeNanos) }
@@ -1083,6 +1084,65 @@ class DeckDepthModelTest {
     }
 
     @Test
+    fun `120 unchanged right drag depth samples require no depth jobs`() = runBlocking {
+        val coordinator = DeckGestureCoordinator(this)
+        coordinator.bindPhoto(9101L)
+        coordinator.onDragStart()
+        val depth = Animatable(0f)
+        var scheduled = 0
+        repeat(120) { i ->
+            coordinator.onDragUpdate(i + 1f, 0f, hThreshold, vThreshold, depth)
+            scheduled += coroutineContext.job.children.count { it.isActive }
+            drainDispatchers()
+        }
+        assertEquals(120f, coordinator.dragLogicalX, 0f)
+        assertEquals(0f, depth.value, 0f)
+        assertEquals("Unchanged depth must not schedule background writes", 0, scheduled)
+    }
+
+    @Test
+    fun `returning to displayed coordinates cancels queued writes without replacements`() = runBlocking {
+        val coordinator = DeckGestureCoordinator(this)
+        coordinator.bindPhoto(9103L)
+        coordinator.onDragStart()
+        val depth = Animatable(0f)
+        val x = Animatable(0f)
+        val y = Animatable(0f)
+        coordinator.onDragUpdate(-70f, 0f, hThreshold, vThreshold, depth)
+        coordinator.updateVisualOffset(-70f, 0f, x, y)
+        coordinator.onDragUpdate(0f, 0f, hThreshold, vThreshold, depth)
+        coordinator.updateVisualOffset(0f, 0f, x, y)
+        assertNull(coordinator.dragVisualJob)
+        drainDispatchers()
+        assertEquals(0f, depth.value, 0f)
+        assertEquals(0f, x.value, 0f)
+        assertEquals(0f, y.value, 0f)
+    }
+
+    @Test
+    fun `return follows every 120 Hz frame until the original handoff`() = runBlocking {
+        val clock = ManualFrameClock(8_333_333L)
+        withContext(clock) {
+            val coordinator = DeckGestureCoordinator(this)
+            val progress = Animatable(0f)
+            var commits = 0
+            coordinator.bindPhoto(9102L)
+            coordinator.commitReturn(progress) { commits++ }
+            drainDispatchers()
+            clock.advanceFrames(1) // first frame establishes animation time zero
+            repeat(50) {
+                val previous = progress.value
+                clock.advanceFrames(1)
+                assertTrue(progress.value > previous)
+                assertEquals(0, commits)
+            }
+            clock.advanceFrames(1)
+            assertEquals(1f, progress.value, 0f)
+            assertEquals(1, commits)
+        }
+    }
+
+    @Test
     fun `queued same direction updates follow latest depth without a transition`() = runBlocking {
         val coordinator = DeckGestureCoordinator(this)
         val depth = Animatable(0f)
@@ -1094,6 +1154,90 @@ class DeckDepthModelTest {
         drainDispatchers()
         assertEquals(0.75f, depth.value, 0.001f)
         assertNull(coordinator.depthTransitionJob)
+    }
+
+    @Test
+    fun `return commits only after shrink tuck and expansion have finished`() = runBlocking {
+        val clock = ManualFrameClock()
+        withContext(clock) {
+            val coordinator = DeckGestureCoordinator(this)
+            val progress = Animatable(0f)
+            val start = DeckReturnModel.capture(180f, -35f, 0.3f, 600f, -50f, hThreshold)
+            var callbacks = 0
+            coordinator.bindPhoto(9001L)
+            coordinator.commitReturn(progress) {
+                assertEquals(1f, progress.value, 0.0001f)
+                assertEquals(0.95f, DeckReturnModel.currentCard(progress.value, start, 3f).scale, 0.0001f)
+                callbacks++
+            }
+            drainDispatchers()
+            assertEquals(0f, progress.value, 0.0001f)
+            val frames = mutableListOf<DeckReturnCardMetrics>()
+            repeat(27) {
+                clock.advanceFrames(1)
+                frames.add(DeckReturnModel.currentCard(progress.value, start, 3f))
+                assertEquals("Index must not change before expansion ends", 0, callbacks)
+            }
+            assertTrue(frames.any { it.scale < 0.61f })
+            assertTrue(frames.any { it.scale > 1.03f })
+            assertTrue(frames.takeLast(5).zipWithNext().all { (a, b) -> b.scale <= a.scale })
+            clock.advanceFrames(3)
+            assertEquals(1, callbacks)
+            assertEquals(1f, progress.value, 0.0001f)
+        }
+    }
+
+    @Test
+    fun `return animation is cancelled when current photo changes`() = runBlocking {
+        val clock = ManualFrameClock()
+        withContext(clock) {
+            val coordinator = DeckGestureCoordinator(this)
+            val progress = Animatable(0f)
+            var oldCallbacks = 0
+            var newCallbacks = 0
+            coordinator.bindPhoto(9002L)
+            coordinator.commitReturn(progress) { oldCallbacks++ }
+            clock.advanceFrames(10)
+            val interruptedAt = progress.value
+            assertTrue(interruptedAt > 0f && interruptedAt < 1f)
+            coordinator.bindPhoto(9003L)
+            val newProgress = Animatable(0f)
+            coordinator.commitReturn(newProgress) { newCallbacks++ }
+            clock.advanceFrames(32)
+            assertEquals(0, oldCallbacks)
+            assertEquals(interruptedAt, progress.value, 0.0001f)
+            assertEquals(1, newCallbacks)
+        }
+    }
+
+    @Test
+    fun `return cancels queued drag writes and ignores duplicate input`() = runBlocking {
+        val clock = ManualFrameClock()
+        withContext(clock) {
+            val coordinator = DeckGestureCoordinator(this)
+            val progress = Animatable(0f)
+            val depth = Animatable(0.25f)
+            val x = Animatable(120f)
+            val y = Animatable(-35f)
+            var callbacks = 0
+            coordinator.bindPhoto(9004L)
+            coordinator.onDragStart(x.value, y.value, hThreshold, vThreshold, depth.value)
+            coordinator.onDragUpdate(180f, -50f, hThreshold, vThreshold, depth)
+            coordinator.updateVisualOffset(180f, -50f, x, y)
+            coordinator.onDragEnd()
+            coordinator.commitReturn(progress) { callbacks++ }
+            coordinator.commitReturn(progress) { callbacks++ }
+            coordinator.onDragStart()
+            coordinator.onDragUpdate(-200f, 0f, hThreshold, vThreshold, depth)
+            drainDispatchers()
+            assertTrue(coordinator.isCommittingSwipe)
+            assertEquals(180f, coordinator.dragLogicalX, 0.0001f)
+            assertEquals(120f, x.value, 0.0001f)
+            assertEquals(-35f, y.value, 0.0001f)
+            assertEquals(0.25f, depth.value, 0.0001f)
+            clock.advanceFrames(32)
+            assertEquals(1, callbacks)
+        }
     }
 
     @Test

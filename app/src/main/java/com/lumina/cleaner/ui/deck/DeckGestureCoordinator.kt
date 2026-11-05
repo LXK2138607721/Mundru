@@ -3,6 +3,7 @@ package com.lumina.cleaner.ui.deck
 import androidx.compose.animation.core.Animatable
 import androidx.compose.animation.core.AnimationSpec
 import androidx.compose.animation.core.FastOutSlowInEasing
+import androidx.compose.animation.core.LinearEasing
 import androidx.compose.animation.core.tween
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
@@ -290,7 +291,7 @@ class DeckGestureCoordinator(
             }
         } else {
             // 若当前无活跃过渡动画，1:1 直接跟手
-            if (!isTransitionActive) {
+            if (!isTransitionActive && targetDepthP != currentP) {
                 val capturedPhotoId = currentPhotoId
                 val capturedEpoch = gestureEpoch
                 dragDepthJob = updateJobScope.launch {
@@ -316,10 +317,14 @@ class DeckGestureCoordinator(
         val capturedPhotoId = currentPhotoId
         val capturedEpoch = gestureEpoch
         dragVisualJob?.cancel()
+        if (animOffsetX.value == targetX && animOffsetY.value == targetY) {
+            dragVisualJob = null
+            return
+        }
         dragVisualJob = updateJobScope.launch {
             if (!isDragging || currentPhotoId != capturedPhotoId || gestureEpoch != capturedEpoch) return@launch
-            animOffsetX.snapTo(targetX)
-            animOffsetY.snapTo(targetY)
+            if (animOffsetX.value != targetX) animOffsetX.snapTo(targetX)
+            if (animOffsetY.value != targetY) animOffsetY.snapTo(targetY)
         }
     }
 
@@ -378,6 +383,32 @@ class DeckGestureCoordinator(
                 }
 
                 // 身份与代次守卫
+                if (currentPhotoId == capturedPhotoId && gestureEpoch == capturedEpoch) {
+                    onCommitSuccess()
+                }
+            } catch (_: CancellationException) {}
+        }
+    }
+
+    /** 右滑回看共用一条时间轴；所有图层就位后才撤回索引。 */
+    fun commitReturn(
+        progress: Animatable<Float, *>,
+        onCommitSuccess: () -> Unit
+    ) {
+        if (isCommittingSwipe) return
+        isCommittingSwipe = true
+        isDragging = false
+        cancelAllJobs()
+        gestureEpoch++
+        val capturedPhotoId = currentPhotoId
+        val capturedEpoch = gestureEpoch
+
+        activeSwipeJob = scope.launch {
+            try {
+                progress.animateTo(
+                    targetValue = 1f,
+                    animationSpec = tween(DeckReturnModel.DURATION_MILLIS, easing = LinearEasing)
+                )
                 if (currentPhotoId == capturedPhotoId && gestureEpoch == capturedEpoch) {
                     onCommitSuccess()
                 }
