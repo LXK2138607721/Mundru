@@ -6,6 +6,7 @@ import androidx.compose.material.icons.rounded.CalendarMonth
 import androidx.compose.material.icons.rounded.Casino
 import androidx.compose.material.icons.rounded.Folder
 import androidx.compose.material.icons.rounded.History
+import androidx.compose.material.icons.rounded.Storage
 import androidx.compose.ui.graphics.vector.ImageVector
 
 /**
@@ -39,13 +40,14 @@ data class PhotoItem(
 /**
  * Mundru 整理模式枚举 (使用 Material Rounded 官方矢量图标，消除全机型 OEM Emoji 渲染差异)
  *
- * 提供四维高效整理维度，专注重塑相册秩序。
+ * 相册整理模式，与模式菜单显示顺序一致。
  */
 enum class SamplingMode(val title: String, val icon: ImageVector, val description: String) {
     RANDOM_WALK("随机漫步", Icons.Rounded.Casino, "时间轴分层抽样，纵览回忆且不重复"),
     TIME_CAPSULE("时光考古", Icons.Rounded.History, "那年今日与远古积存，深水区拓荒"),
     ALBUM_CLEANUP("图集专清", Icons.Rounded.Folder, "挑选特定图集，专注定向清理"),
-    MONTH_CLEANUP("月份专清", Icons.Rounded.CalendarMonth, "按年月时间轴归档，精准清理历史月度")
+    MONTH_CLEANUP("月份专清", Icons.Rounded.CalendarMonth, "按年月时间轴归档，精准清理历史月度"),
+    LARGE_PHOTO_CLEANUP("大图专清", Icons.Rounded.Storage, "优先整理最占空间的照片")
 }
 
 /**

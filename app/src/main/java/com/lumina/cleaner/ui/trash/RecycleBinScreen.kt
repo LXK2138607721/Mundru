@@ -41,6 +41,7 @@ import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateListOf
 import androidx.compose.runtime.mutableStateOf
@@ -60,6 +61,7 @@ import coil.compose.SubcomposeAsyncImage
 import com.lumina.cleaner.core.database.LocalTrashEntity
 import com.lumina.cleaner.core.model.PhotoItem
 import com.lumina.cleaner.core.util.HapticFeedback
+import com.lumina.cleaner.core.util.formatFileSize
 import com.lumina.cleaner.ui.viewer.PhotoViewerOverlay
 import kotlinx.coroutines.launch
 
@@ -79,20 +81,24 @@ import kotlinx.coroutines.launch
 fun RecycleBinScreen(
     trashItems: List<LocalTrashEntity>,
     onRestore: (List<Long>) -> Unit,
-    onPermanentDelete: (List<Long>, List<Uri>) -> Unit,
+    onPermanentDelete: (List<Uri>) -> Unit,
     onBack: () -> Unit,
     onResolvePhotoItem: (suspend (Long) -> PhotoItem?)? = null
 ) {
     val context = LocalContext.current
     val coroutineScope = rememberCoroutineScope()
     val selectedIds = remember { mutableStateListOf<Long>() }
+    LaunchedEffect(trashItems) {
+        val liveIds = trashItems.mapTo(HashSet()) { it.photoId }
+        selectedIds.retainAll(liveIds)
+    }
     var previewPhoto by remember { mutableStateOf<PhotoItem?>(null) }
 
     // 拦截系统返回键/手势，平滑返回上一级主界面
     BackHandler(onBack = onBack)
 
     val totalBytes = trashItems.sumOf { it.size }
-    val formattedSize = formatSize(totalBytes)
+    val formattedSize = formatFileSize(totalBytes)
 
     Box(
         modifier = Modifier
@@ -202,7 +208,7 @@ fun RecycleBinScreen(
                     horizontalArrangement = Arrangement.spacedBy(6.dp),
                     verticalArrangement = Arrangement.spacedBy(6.dp)
                 ) {
-                    items(trashItems) { item ->
+                    items(trashItems, key = { it.photoId }) { item ->
                         val isSelected = item.photoId in selectedIds
                         val uri = Uri.parse(item.uriString)
 
@@ -244,13 +250,13 @@ fun RecycleBinScreen(
                                         ) {
                                             Icon(
                                                 imageVector = Icons.Rounded.BrokenImage,
-                                                contentDescription = "已失效",
+                                                contentDescription = "无法读取",
                                                 tint = MaterialTheme.colorScheme.error.copy(alpha = 0.7f),
                                                 modifier = Modifier.size(24.dp)
                                             )
                                             Spacer(modifier = Modifier.height(2.dp))
                                             Text(
-                                                text = "原图已失效",
+                                                text = "无法读取原图",
                                                 fontSize = 9.sp,
                                                 color = MaterialTheme.colorScheme.onSurfaceVariant
                                             )
@@ -333,10 +339,7 @@ fun RecycleBinScreen(
                                 } else {
                                     trashItems.filter { it.photoId in selectedIds }
                                 }
-                                val toDeleteIds = targets.map { it.photoId }
-                                val toDeleteUris = targets.map { Uri.parse(it.uriString) }
-                                onPermanentDelete(toDeleteIds, toDeleteUris)
-                                selectedIds.clear()
+                                onPermanentDelete(targets.map { Uri.parse(it.uriString) })
                             },
                             shape = RoundedCornerShape(12.dp),
                             colors = ButtonDefaults.buttonColors(containerColor = MaterialTheme.colorScheme.error)
@@ -371,12 +374,3 @@ private fun LocalTrashEntity.toPhotoItem(): PhotoItem = PhotoItem(
     height = 0,
     bucketName = "相册回收站"
 )
-
-private fun formatSize(bytes: Long): String {
-    return when {
-        bytes < 1024 -> "$bytes B"
-        bytes < 1024 * 1024 -> String.format("%.1f KB", bytes / 1024.0)
-        bytes < 1024 * 1024 * 1024 -> String.format("%.1f MB", bytes / (1024.0 * 1024.0))
-        else -> String.format("%.2f GB", bytes / (1024.0 * 1024.0 * 1024.0))
-    }
-}

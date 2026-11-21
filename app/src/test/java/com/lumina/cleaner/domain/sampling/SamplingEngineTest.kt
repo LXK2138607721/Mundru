@@ -3,9 +3,11 @@ package com.lumina.cleaner.domain.sampling
 import android.net.Uri
 import com.lumina.cleaner.core.model.MonthBucket
 import com.lumina.cleaner.core.model.PhotoItem
+import com.lumina.cleaner.core.model.SamplingMode
 import java.time.LocalDate
 import java.time.ZoneId
 import kotlin.random.Random
+import kotlinx.coroutines.runBlocking
 import org.junit.Assert.*
 import org.junit.Test
 import org.mockito.Mockito.mock
@@ -45,11 +47,13 @@ class SamplingEngineTest {
             assertTrue(engine.getTimeCapsuleBatch(photos, size).isEmpty())
             assertTrue(engine.getAlbumCleanupBatch(photos, size, "Camera").isEmpty())
             assertTrue(engine.getMonthCleanupBatch(photos, size, null).isEmpty())
+            assertTrue(engine.getLargePhotoCleanupBatch(photos, size).isEmpty())
         }
         assertEquals(2, engine.getStratifiedRandomBatch(photos, 15, emptyMap()).size)
         assertEquals(2, engine.getTimeCapsuleBatch(photos, 15).size)
         assertEquals(2, engine.getAlbumCleanupBatch(photos, 15, "Camera").size)
         assertEquals(2, engine.getMonthCleanupBatch(photos, 15, null).size)
+        assertEquals(2, engine.getLargePhotoCleanupBatch(photos, 15).size)
     }
 
     @Test fun `strata cover the whole timeline even when pool barely exceeds batch`() {
@@ -87,6 +91,36 @@ class SamplingEngineTest {
         val photos = listOf(photo(1, start - 1), photo(2, start), photo(3, end - 1), photo(4, end))
         assertEquals(listOf(3L, 2L), engine.getMonthCleanupBatch(photos, 15, bucket).map { it.id })
         assertEquals(listOf(2L), engine.getMonthCleanupBatch(photos, 15, bucket, mapOf(3L to now)).map { it.id })
+    }
+
+    @Test fun `large photo mode ranks bytes not dimensions across all albums and months`() {
+        val photos = listOf(
+            photo(5).copy(size = 0),
+            photo(4).copy(size = 64, width = 10_000, height = 10_000),
+            photo(3, album = "Downloads").copy(size = 20_000_000),
+            photo(2, now - day).copy(size = 20_000_000),
+            photo(1).copy(size = 3_000_000_000),
+            photo(6).copy(size = -1)
+        )
+        val batch = runBlocking {
+            engine.generateBatch(SamplingMode.LARGE_PHOTO_CLEANUP, photos, 5,
+                targetAlbumBucket = "Camera", targetMonthBucket = MonthBucket(2026, 1, "2026年1月", 1, now, now + day))
+        }
+        assertEquals(listOf(1L, 2L, 3L, 4L), batch.map { it.id })
+    }
+
+    @Test fun `large photo batches honor configured counts and skip recently kept photos`() {
+        val photos = (1L..37L).map { photo(it).copy(size = it * 1000) }
+        for (batchSize in listOf(5, 10, 15, 20, 30)) {
+            val first = engine.getLargePhotoCleanupBatch(photos, batchSize)
+            assertEquals((37L downTo 38L - batchSize).toList(), first.map { it.id })
+
+            val justKept = first.associate { it.id to now - day + 1 }
+            val remaining = engine.getLargePhotoCleanupBatch(photos, batchSize, justKept)
+            assertEquals(((37L - batchSize) downTo maxOf(1L, 38L - 2 * batchSize)).toList(), remaining.map { it.id })
+        }
+        assertTrue(engine.getLargePhotoCleanupBatch(photos, 5, photos.associate { it.id to now }).isEmpty())
+        assertEquals(37L, engine.getLargePhotoCleanupBatch(photos, 5, mapOf(37L to now - day)).first().id)
     }
 
     @Test fun `anniversary selection crosses month and year boundaries`() {

@@ -201,12 +201,16 @@ object MotionPhotoParser {
             }
         } catch (_: Exception) { }
 
-        resolver.query(uri, arrayOf(MediaStore.MediaColumns.SIZE), null, null, null)?.use { cursor ->
-            val sizeCol = cursor.getColumnIndex(MediaStore.MediaColumns.SIZE)
-            if (sizeCol >= 0 && cursor.moveToFirst()) {
-                val size = cursor.getLong(sizeCol)
-                if (size > 0) return size
+        try {
+            resolver.query(uri, arrayOf(MediaStore.MediaColumns.SIZE), null, null, null)?.use { cursor ->
+                val sizeCol = cursor.getColumnIndex(MediaStore.MediaColumns.SIZE)
+                if (sizeCol >= 0 && cursor.moveToFirst()) {
+                    val size = cursor.getLong(sizeCol)
+                    if (size > 0) return size
+                }
             }
+        } catch (_: SecurityException) {
+            // The selected media grant may change between the scan and the read.
         }
         return null
     }

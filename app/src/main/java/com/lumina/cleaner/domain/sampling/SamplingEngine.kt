@@ -1,6 +1,5 @@
 package com.lumina.cleaner.domain.sampling
 
-import android.content.Context
 import com.lumina.cleaner.core.model.MonthBucket
 import com.lumina.cleaner.core.model.PhotoItem
 import com.lumina.cleaner.core.model.SamplingMode
@@ -17,13 +16,14 @@ import kotlinx.coroutines.withContext
 /**
  * Mundru 智能抽样引擎 (SamplingEngine)
  * 品牌释义：Mundru 源自格陵兰语（Greenlandic），意为「擦掉 / 擦除」。
- * 引擎定位：相册智能分层抽样核心，驱动碎片化漫步、时光考古、图集与月份定向整理。
+ * 引擎定位：驱动随机漫步、时光考古，以及按图集、月份和文件大小整理。
  *
- * 核心整理模式（4 大黄金板块）：
+ * 核心整理模式：
  * 1. 分层随机漫步 (Random Walk)：时间轴分桶 + 严格 24 小时冷却，保证全相册漫游且绝不反复重复
  * 2. 时光考古 (Time Capsule)：优先至少 180 天前的老照片；无半年老照片时保留至少 30 天的原有降级规则
  * 3. 图集专清 (Album Cleanup)：指定相册深度清理，加入冷却游标机制，每批推送未整理的新照片
  * 4. 月份专清 (Month Cleanup)：指定历史月份归档清理，加入冷却游标机制
+ * 5. 大图专清 (Large Photo Cleanup)：优先推送占用空间最大的可整理照片
  *
  * 严格去重与冷却契约：
  * 任何被左滑保留（不打算清理）的图片，在 24 小时冷却保护期内绝对不会在后续轮次中重复出现；
@@ -43,20 +43,19 @@ class SamplingEngine(
      * 主分发入口（全模式接入 viewHistoryMap 统一冷却与防重）
      */
     suspend fun generateBatch(
-        context: Context,
         mode: SamplingMode,
         allPhotos: List<PhotoItem>,
         batchSize: Int,
         viewHistoryMap: Map<Long, Long> = emptyMap(),
         targetAlbumBucket: String? = null,
-        targetMonthBucket: MonthBucket? = null,
-        onHashComputed: (suspend (Long, Long) -> Unit)? = null
+        targetMonthBucket: MonthBucket? = null
     ): List<PhotoItem> = withContext(Dispatchers.Default) {
         when (mode) {
             SamplingMode.RANDOM_WALK -> getStratifiedRandomBatch(allPhotos, batchSize, viewHistoryMap)
             SamplingMode.TIME_CAPSULE -> getTimeCapsuleBatch(allPhotos, batchSize, viewHistoryMap)
             SamplingMode.ALBUM_CLEANUP -> getAlbumCleanupBatch(allPhotos, batchSize, targetAlbumBucket, viewHistoryMap)
             SamplingMode.MONTH_CLEANUP -> getMonthCleanupBatch(allPhotos, batchSize, targetMonthBucket, viewHistoryMap)
+            SamplingMode.LARGE_PHOTO_CLEANUP -> getLargePhotoCleanupBatch(allPhotos, batchSize, viewHistoryMap)
         }
     }
 
@@ -224,6 +223,20 @@ class SamplingEngine(
     }
 
     /**
+     * 5. 大图专清：仅使用已索引的文件字节数，不解码图片。
+     */
+    internal fun getLargePhotoCleanupBatch(
+        allPhotos: List<PhotoItem>,
+        batchSize: Int,
+        viewHistory: Map<Long, Long> = emptyMap()
+    ): List<PhotoItem> {
+        if (batchSize <= 0) return emptyList()
+        return filterWithCooldown(allPhotos.filter { it.hasKnownFileSize }, viewHistory)
+            .sortedWith(compareByDescending<PhotoItem> { it.size }.thenBy { it.id })
+            .take(batchSize)
+    }
+
+    /**
      * 提取相册内所有可用的历史月份归档列表
      */
     fun extractMonthBuckets(allPhotos: List<PhotoItem>): List<MonthBucket> {
@@ -268,3 +281,5 @@ class SamplingEngine(
         }.sortedByDescending { it.startMillis }
     }
 }
+
+internal val PhotoItem.hasKnownFileSize: Boolean get() = size > 0L

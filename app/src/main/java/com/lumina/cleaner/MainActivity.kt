@@ -2,8 +2,10 @@ package com.lumina.cleaner
 
 import android.Manifest
 import android.app.Activity
+import android.app.RecoverableSecurityException
 import android.content.ContentUris
 import android.content.Context
+import android.content.IntentSender
 import android.content.pm.PackageManager
 import android.net.Uri
 import android.os.Build
@@ -97,10 +99,12 @@ import com.lumina.cleaner.domain.album.AlbumInfo
 import com.lumina.cleaner.domain.album.AlbumManager
 import com.lumina.cleaner.domain.motion.MotionPhotoParser
 import com.lumina.cleaner.domain.sampling.SamplingEngine
+import com.lumina.cleaner.domain.sampling.hasKnownFileSize
 import com.lumina.cleaner.ui.album.AlbumBottomSheet
 import com.lumina.cleaner.ui.album.MonthBottomSheet
 import com.lumina.cleaner.ui.deck.CardStack
 import com.lumina.cleaner.ui.deck.CardSwipeAction
+import com.lumina.cleaner.ui.deck.DeckShaderWarmup
 import com.lumina.cleaner.core.util.HapticFeedback
 import com.lumina.cleaner.core.util.HapticIntensity
 import com.lumina.cleaner.ui.deck.ModePill
@@ -115,8 +119,14 @@ import com.lumina.cleaner.ui.trash.RecycleBinScreen
 import com.lumina.cleaner.core.database.toPhotoItem
 import com.lumina.cleaner.ui.viewer.PhotoViewerOverlay
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.Job
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
+
+private const val PENDING_DELETE_URIS = "mundru_pending_delete_uris"
+private const val MAX_DELETE_REQUEST = 2000
 
 enum class ActiveScreen {
     MAIN,
@@ -153,49 +163,52 @@ class MainActivity : ComponentActivity() {
 
     // Android 11+ Scoped Storage 系统批量彻底删除 Launcher
     private lateinit var deletePermissionLauncher: ActivityResultLauncher<IntentSenderRequest>
-    private var pendingDeletePhotoIds: List<Long>? = null
-    private var pendingDeleteUris: List<Uri>? = null
-    private var onDeleteCompleteCallback: (() -> Unit)? = null
+    private var pendingDeleteUris: List<String>? = null
+    private var deletionBusy = false
+    private var inventoryRevision by mutableIntStateOf(0)
+    private var permissionWarmup: Job? = null
 
     private val permissionLauncher = registerForActivityResult(
         ActivityResultContracts.RequestMultiplePermissions()
     ) {
+        permissionWarmup?.cancel()
+        permissionWarmup = null
         updatePermissionStatus()
+        inventoryRevision++
     }
 
     override fun onCreate(savedInstanceState: Bundle?) {
         enableEdgeToEdge()
         super.onCreate(savedInstanceState)
 
-        // 注册系统删除结果回调（Fix Defect A：双重主键绑定与 URI 兜底，绝无幽灵残留条目）
+        pendingDeleteUris = savedInstanceState?.getStringArrayList(PENDING_DELETE_URIS)
+        deletionBusy = pendingDeleteUris != null
         deletePermissionLauncher = registerForActivityResult(
             ActivityResultContracts.StartIntentSenderForResult()
         ) { result ->
-            if (result.resultCode == Activity.RESULT_OK) {
-                val ids = pendingDeletePhotoIds ?: emptyList()
-                val uris = pendingDeleteUris ?: emptyList()
-                lifecycleScopeLaunch {
-                    withContext(Dispatchers.IO) {
-                        if (ids.isNotEmpty()) {
-                            database.photoDao().deleteFromTrash(ids)
+            val uris = pendingDeleteUris.orEmpty()
+            pendingDeleteUris = null
+            lifecycleScopeLaunch {
+                try {
+                    if (result.resultCode != Activity.RESULT_OK) {
+                        showDeleteMessage("已取消删除")
+                    } else if (Build.VERSION.SDK_INT == Build.VERSION_CODES.Q) {
+                        val removed = withContext(Dispatchers.IO) {
+                            uris.filter { uri ->
+                                try {
+                                    contentResolver.delete(Uri.parse(uri), null, null) > 0
+                                } catch (_: RuntimeException) {
+                                    false
+                                }
+                            }
                         }
-                        val uriStrings = uris.map { it.toString() }
-                        if (uriStrings.isNotEmpty()) {
-                            database.photoDao().deleteFromTrashByUris(uriStrings)
-                        }
+                        finishPhysicalDelete(removed)
+                    } else {
+                        finishPhysicalDelete(uris)
                     }
-                    val deletedCount = maxOf(ids.size, uris.size)
-                    Toast.makeText(this@MainActivity, "已成功从设备彻底删除 $deletedCount 张照片", Toast.LENGTH_SHORT).show()
-                    onDeleteCompleteCallback?.invoke()
-                    pendingDeletePhotoIds = null
-                    pendingDeleteUris = null
-                    onDeleteCompleteCallback = null
+                } finally {
+                    deletionBusy = false
                 }
-            } else {
-                Toast.makeText(this@MainActivity, "取消删除", Toast.LENGTH_SHORT).show()
-                pendingDeletePhotoIds = null
-                pendingDeleteUris = null
-                onDeleteCompleteCallback = null
             }
         }
 
@@ -361,90 +374,131 @@ class MainActivity : ComponentActivity() {
         } else {
             arrayOf(Manifest.permission.READ_EXTERNAL_STORAGE)
         }
+        val firstAccess = !hasPermission
         permissionLauncher.launch(perms)
-    }
-
-    /**
-     * 校验 URI 在当前设备 MediaStore 中是否依然真实存在（外部失效探活）
-     */
-    private fun checkUriExists(uri: Uri): Boolean {
-        return try {
-            contentResolver.query(uri, arrayOf(MediaStore.Images.Media._ID), null, null, null)?.use { cursor ->
-                cursor.moveToFirst()
-            } ?: false
-        } catch (e: Exception) {
-            false
+        // The system permission window is in a different process. Use that time instead of
+        // competing with first-time indexing after the user grants access.
+        if (firstAccess && Build.VERSION.SDK_INT >= Build.VERSION_CODES.S && permissionWarmup == null) {
+            val app = applicationContext
+            val density = resources.displayMetrics.density
+            permissionWarmup = lifecycleScope.launch(Dispatchers.Default) {
+                delay(200)
+                DeckShaderWarmup.prepare(app, density) { isActive }
+            }
         }
     }
 
-    /**
-     * 调用系统 Scoped Storage 批量删除（集成失效死图异步探活分流，杜绝全选卡死）
-     */
-    fun requestSystemDelete(photoIds: List<Long>, uris: List<Uri>, onComplete: () -> Unit) {
+    override fun onSaveInstanceState(outState: Bundle) {
+        pendingDeleteUris?.let { outState.putStringArrayList(PENDING_DELETE_URIS, ArrayList(it)) }
+        super.onSaveInstanceState(outState)
+    }
+
+    private fun showDeleteMessage(message: String) {
+        Toast.makeText(this, message, Toast.LENGTH_SHORT).show()
+    }
+
+    private suspend fun removeTrashRows(uris: List<String>) {
         if (uris.isEmpty()) return
+        val committed = photoWrites.enqueue {
+            database.withTransaction {
+                uris.chunked(900).forEach { database.photoDao().deleteFromTrashByUris(it) }
+            }
+        }
+        committed.join()
+    }
 
+    private suspend fun finishPhysicalDelete(uris: List<String>) {
+        removeTrashRows(uris)
+        if (uris.isNotEmpty()) inventoryRevision++
+        showDeleteMessage(
+            if (uris.isEmpty()) "未删除照片，已保留回收站记录"
+            else "已从设备删除 ${uris.size} 张照片"
+        )
+    }
+
+    private fun confirmSystemDelete(uris: List<String>, sender: IntentSender) {
+        pendingDeleteUris = uris
+        try {
+            deletePermissionLauncher.launch(IntentSenderRequest.Builder(sender).build())
+        } catch (e: Exception) {
+            pendingDeleteUris = null
+            throw e
+        }
+    }
+
+    private fun requestSystemDelete(uris: List<Uri>) {
+        if (uris.isEmpty() || deletionBusy) return
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.Q &&
+            ContextCompat.checkSelfPermission(this, Manifest.permission.WRITE_EXTERNAL_STORAGE) != PackageManager.PERMISSION_GRANTED
+        ) {
+            permissionLauncher.launch(arrayOf(Manifest.permission.WRITE_EXTERNAL_STORAGE))
+            showDeleteMessage("授予存储写入权限后，请重新确认删除")
+            return
+        }
+
+        deletionBusy = true
+        val canVerifyMissing = hasPermission && !isPartialAccess
         lifecycleScopeLaunch {
-            val (validPairs, orphanPairs) = withContext(Dispatchers.IO) {
-                val valid = mutableListOf<Pair<Long, Uri>>()
-                val orphan = mutableListOf<Pair<Long, Uri>>()
-                for (i in uris.indices) {
-                    val uri = uris[i]
-                    val id = photoIds.getOrElse(i) { -1L }
-                    if (checkUriExists(uri)) {
-                        valid.add(Pair(id, uri))
+            try {
+                val targets = uris.distinct()
+                val requested = targets.take(MAX_DELETE_REQUEST)
+                val (available, missing) = withContext(Dispatchers.IO) {
+                    val available = mutableListOf<Uri>()
+                    val missing = mutableListOf<String>()
+                    for (uri in requested) {
+                        val present = try {
+                            contentResolver.query(uri, arrayOf(MediaStore.Images.Media._ID), null, null, null)
+                                ?.use { it.moveToFirst() }
+                        } catch (_: SecurityException) {
+                            null
+                        }
+                        if (present == true) available.add(uri)
+                        else if (present == false && canVerifyMissing) missing.add(uri.toString())
+                    }
+                    available to missing
+                }
+
+                removeTrashRows(missing)
+                if (missing.isNotEmpty()) inventoryRevision++
+                val skipped = targets.size - available.size - missing.size
+                if (available.isEmpty()) {
+                    showDeleteMessage(if (skipped > 0) "部分照片无法访问，未移除其回收站记录" else "已清理失效条目")
+                } else if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
+                    if (skipped > 0) showDeleteMessage("有 $skipped 张未纳入本次删除，已保留")
+                    val request = MediaStore.createDeleteRequest(contentResolver, available)
+                    confirmSystemDelete(available.map(Uri::toString), request.intentSender)
+                } else {
+                    val removed = mutableListOf<String>()
+                    var consent: Pair<String, IntentSender>? = null
+                    withContext(Dispatchers.IO) {
+                        for (uri in available) {
+                            try {
+                                if (contentResolver.delete(uri, null, null) > 0) removed.add(uri.toString())
+                            } catch (e: SecurityException) {
+                                if (Build.VERSION.SDK_INT == Build.VERSION_CODES.Q && e is RecoverableSecurityException) {
+                                    consent = uri.toString() to e.userAction.actionIntent.intentSender
+                                    break
+                                }
+                            } catch (_: RuntimeException) {
+                                // Keep the entry when the provider did not confirm deletion.
+                            }
+                        }
+                    }
+                    if (consent != null) {
+                        removeTrashRows(removed)
+                        if (removed.isNotEmpty()) inventoryRevision++
+                        if (available.size - removed.size > 1) showDeleteMessage("此系统需逐张授权，其余照片已保留")
+                        consent?.let { (uri, sender) -> confirmSystemDelete(listOf(uri), sender) }
                     } else {
-                        orphan.add(Pair(id, uri))
+                        finishPhysicalDelete(removed)
                     }
                 }
-                Pair(valid, orphan)
-            }
-
-            // 1. 外部失效死图自动分流：直接从本地数据库静默抹除，绝不阻塞批量物理删除
-            if (orphanPairs.isNotEmpty()) {
-                withContext(Dispatchers.IO) {
-                    val orphanIds = orphanPairs.map { it.first }.filter { it > 0 }
-                    if (orphanIds.isNotEmpty()) {
-                        database.photoDao().deleteFromTrash(orphanIds)
-                    }
-                    val orphanUriStrings = orphanPairs.map { it.second.toString() }
-                    database.photoDao().deleteFromTrashByUris(orphanUriStrings)
-                }
-            }
-
-            // 2. 若全部为失效死图，提示清理成功并直接结束
-            if (validPairs.isEmpty()) {
-                Toast.makeText(this@MainActivity, "已清理 ${orphanPairs.size} 个外部失效条目", Toast.LENGTH_SHORT).show()
-                onComplete()
-                return@lifecycleScopeLaunch
-            }
-
-            val validIds = validPairs.map { it.first }
-            val validUris = validPairs.map { it.second }
-
-            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
-                try {
-                    val pendingIntent = MediaStore.createDeleteRequest(contentResolver, validUris)
-                    pendingDeletePhotoIds = validIds
-                    pendingDeleteUris = validUris
-                    onDeleteCompleteCallback = onComplete
-                    deletePermissionLauncher.launch(
-                        IntentSenderRequest.Builder(pendingIntent.intentSender).build()
-                    )
-                } catch (e: Exception) {
-                    Toast.makeText(this@MainActivity, "发起删除请求失败: ${e.message}", Toast.LENGTH_SHORT).show()
-                }
-            } else {
-                // Android 10 及以下直接使用 ContentResolver 删除
-                withContext(Dispatchers.IO) {
-                    validUris.forEach { contentResolver.delete(it, null, null) }
-                    if (validIds.isNotEmpty()) {
-                        database.photoDao().deleteFromTrash(validIds)
-                    }
-                    val uriStrings = validUris.map { it.toString() }
-                    database.photoDao().deleteFromTrashByUris(uriStrings)
-                }
-                Toast.makeText(this@MainActivity, "已彻底删除 ${validUris.size} 张照片", Toast.LENGTH_SHORT).show()
-                onComplete()
+            } catch (e: kotlinx.coroutines.CancellationException) {
+                throw e
+            } catch (_: Exception) {
+                showDeleteMessage("删除未完成，请重试。未确认删除的照片仍保留在回收站。")
+            } finally {
+                if (pendingDeleteUris == null) deletionBusy = false
             }
         }
     }
@@ -481,7 +535,8 @@ class MainActivity : ComponentActivity() {
         var currentMode by remember { mutableStateOf(SamplingMode.RANDOM_WALK) }
         var currentBatch by remember { mutableStateOf<List<PhotoItem>>(emptyList()) }
         var currentIndex by remember { mutableIntStateOf(0) }
-        var allLibraryPhotos by remember { mutableStateOf<List<PhotoItem>>(emptyList()) }
+        var librarySnapshot by remember { mutableStateOf<List<PhotoItem>?>(null) }
+        val allLibraryPhotos = librarySnapshot.orEmpty()
         var isLoading by remember { mutableStateOf(true) }
 
         // 专清模式目标
@@ -515,9 +570,12 @@ class MainActivity : ComponentActivity() {
         var reloadBatchJob by remember { mutableStateOf<kotlinx.coroutines.Job?>(null) }
 
         fun persistPhotoAction(write: suspend () -> Unit) {
-            val committed = photoWrites.enqueue(write)
-            coroutineScope.launch {
-                committed.join()
+            photoWrites.enqueue(write)
+        }
+
+        LaunchedEffect(activeScreen) {
+            if (activeScreen == ActiveScreen.SETTINGS) {
+                photoWrites.awaitPendingWrites()
                 totalReviewedCount = withContext(Dispatchers.IO) { photoDao.getTotalReviewedCount() ?: 0L }
             }
         }
@@ -527,15 +585,71 @@ class MainActivity : ComponentActivity() {
             activeScreen = ActiveScreen.MAIN
         }
 
+        // Serialize scan results with accepted review writes, including those from a previous Activity.
+        suspend fun scanVisiblePhotos(): List<PhotoItem> =
+            try {
+                withContext(Dispatchers.IO) { scanMediaStoreFast() }
+            } catch (_: SecurityException) {
+                updatePermissionStatus()
+                emptyList()
+            }
+
+        suspend fun syncPhotoLibrary(photos: List<PhotoItem>) {
+            val synchronized = photoWrites.enqueue {
+                photoDatabase.withTransaction {
+                    val existingMap = photoDao.getAllPhotosSync().associateBy { it.id }
+                    val changed = mutableListOf<PhotoEntity>()
+                    for (photo in photos) {
+                        val existing = existingMap[photo.id]
+                        val entity = PhotoEntity(
+                            id = photo.id,
+                            uriString = photo.uri.toString(),
+                            displayName = photo.displayName,
+                            dateModified = photo.dateModified,
+                            dateTaken = photo.dateTaken,
+                            size = photo.size,
+                            width = photo.width,
+                            height = photo.height,
+                            bucketName = photo.bucketName,
+                            relativePath = null,
+                            isLivePhoto = existing?.isLivePhoto ?: false,
+                            motionVideoOffset = existing?.motionVideoOffset ?: 0L,
+                            motionVideoLength = existing?.motionVideoLength ?: 0L,
+                            isHdr = existing?.isHdr == true || photo.isHdr,
+                            viewCount = existing?.viewCount ?: 0,
+                            lastViewedAt = existing?.lastViewedAt ?: 0L
+                        )
+                        if (entity != existing) changed.add(entity)
+                    }
+                    if (changed.isNotEmpty()) photoDao.insertOrUpdateAll(changed)
+                }
+            }
+            synchronized.join()
+        }
+
         // 重新加载批次（带取消机制与全模式 24h 冷却防重复算法）
-        fun reloadBatch(mode: SamplingMode) {
+        fun reloadBatch(mode: SamplingMode, refreshLibrary: Boolean = false) {
             reloadBatchJob?.cancel()
             val batchSize = currentBatchSize
             val albumBucket = selectedAlbumBucket
             val monthBucket = selectedMonthBucket
-            val libraryPhotos = allLibraryPhotos
+            isLoading = true
             reloadBatchJob = coroutineScope.launch {
-                isLoading = true
+                val cached = librarySnapshot
+                var shaderWarmup: Job? = null
+                val libraryPhotos = if (refreshLibrary || cached == null) {
+                    val scanned = scanVisiblePhotos()
+                    if (cached == null && scanned.size > 1 && Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
+                        val density = resources.displayMetrics.density
+                        val app = applicationContext
+                        shaderWarmup = launch(Dispatchers.Default) {
+                            DeckShaderWarmup.prepare(app, density) { isActive }
+                        }
+                    }
+                    syncPhotoLibrary(scanned)
+                    librarySnapshot = scanned
+                    scanned
+                } else cached
                 if (libraryPhotos.isEmpty()) {
                     currentBatch = emptyList()
                     currentIndex = 0
@@ -564,7 +678,6 @@ class MainActivity : ComponentActivity() {
                 }
 
                 val batch = samplingEngine.generateBatch(
-                    context = this@MainActivity,
                     mode = mode,
                     allPhotos = activePhotos,
                     batchSize = batchSize,
@@ -611,6 +724,7 @@ class MainActivity : ComponentActivity() {
                             t > 0L && (System.currentTimeMillis() - t) >= 30L * 24 * 3600 * 1000L
                         }
                         SamplingMode.RANDOM_WALK -> activePhotos.isNotEmpty()
+                        SamplingMode.LARGE_PHOTO_CLEANUP -> activePhotos.any { it.hasKnownFileSize }
                     }
                 }
                 isBatchInCooldown = enrichedBatch.isEmpty() && hasCandidatesForMode
@@ -618,46 +732,13 @@ class MainActivity : ComponentActivity() {
                 currentBatch = enrichedBatch
                 currentIndex = 0
                 actionHistory.clear()
+                shaderWarmup?.cancel()
                 isLoading = false
             }
         }
 
-        // Serialize read/merge/REPLACE with accepted review writes, including those from a previous Activity.
-        LaunchedEffect(Unit) {
-            val photos = withContext(Dispatchers.IO) { scanMediaStoreFast() }
-            var synchronizedEntities = emptyList<PhotoEntity>()
-            val synchronized = photoWrites.enqueue {
-                synchronizedEntities = photoDatabase.withTransaction {
-                    val existingMap = photoDao.getAllPhotosSync().associateBy { it.id }
-                    val entities = photos.map { photo ->
-                        val existing = existingMap[photo.id]
-                        PhotoEntity(
-                            id = photo.id,
-                            uriString = photo.uri.toString(),
-                            displayName = photo.displayName,
-                            dateModified = photo.dateModified,
-                            dateTaken = photo.dateTaken,
-                            size = photo.size,
-                            width = photo.width,
-                            height = photo.height,
-                            bucketName = photo.bucketName,
-                            relativePath = null,
-                            isLivePhoto = existing?.isLivePhoto ?: false,
-                            motionVideoOffset = existing?.motionVideoOffset ?: 0L,
-                            motionVideoLength = existing?.motionVideoLength ?: 0L,
-                            isHdr = existing?.isHdr == true || photo.isHdr,
-                            viewCount = existing?.viewCount ?: 0,
-                            lastViewedAt = existing?.lastViewedAt ?: 0L
-                        )
-                    }
-                    photoDao.insertOrUpdateAll(entities)
-                    entities
-                }
-            }
-            synchronized.join()
-            allLibraryPhotos = synchronizedEntities.map { it.toPhotoItem() }
-            totalReviewedCount = withContext(Dispatchers.IO) { photoDao.getTotalReviewedCount() ?: 0L }
-            reloadBatch(currentMode)
+        LaunchedEffect(inventoryRevision) {
+            reloadBatch(currentMode, refreshLibrary = true)
         }
 
         // 全屏界面双向物理转场与主舞台（全覆盖当前主题背景，彻底消灭转场缝隙露白）
@@ -787,16 +868,14 @@ class MainActivity : ComponentActivity() {
                             persistPhotoAction {
                                 val now = System.currentTimeMillis()
                                 photoDatabase.withTransaction {
-                                    photoDao.restoreFromTrashBatch(photoIds)
-                                    photoDao.markViewedBatch(photoIds, now)
+                                    photoIds.chunked(900).forEach { ids ->
+                                        photoDao.restoreFromTrashBatch(ids)
+                                        photoDao.markViewedBatch(ids, now)
+                                    }
                                 }
                             }
                         },
-                        onPermanentDelete = { photoIds, uris ->
-                            requestSystemDelete(photoIds, uris) {
-                                reloadBatch(currentMode)
-                            }
-                        },
+                        onPermanentDelete = ::requestSystemDelete,
                         onBack = { activeScreen = ActiveScreen.MAIN }
                     )
                 }
@@ -887,7 +966,7 @@ class MainActivity : ComponentActivity() {
                                             .clip(CircleShape)
                                             .clickable {
                                                 HapticFeedback.click(this@MainActivity)
-                                                reloadBatch(currentMode)
+                                                reloadBatch(currentMode, refreshLibrary = true)
                                             }
                                     ) {
                                         Box(contentAlignment = Alignment.Center) {
@@ -1037,11 +1116,7 @@ class MainActivity : ComponentActivity() {
                                                     Button(
                                                         onClick = {
                                                             HapticFeedback.heavy(this@MainActivity)
-                                                            val ids = trashItems.map { it.photoId }
-                                                            val uris = trashItems.map { Uri.parse(it.uriString) }
-                                                            requestSystemDelete(ids, uris) {
-                                                                reloadBatch(currentMode)
-                                                            }
+                                                            requestSystemDelete(trashItems.map { Uri.parse(it.uriString) })
                                                         },
                                                         colors = ButtonDefaults.buttonColors(containerColor = MaterialTheme.colorScheme.error),
                                                         shape = RoundedCornerShape(12.dp)
@@ -1105,7 +1180,7 @@ class MainActivity : ComponentActivity() {
                                                 Button(
                                                     onClick = {
                                                         HapticFeedback.click(this@MainActivity)
-                                                        reloadBatch(currentMode)
+                                                        reloadBatch(currentMode, refreshLibrary = true)
                                                     },
                                                     colors = if (isBatchInCooldown)
                                                         ButtonDefaults.buttonColors(
@@ -1125,6 +1200,7 @@ class MainActivity : ComponentActivity() {
                                     CardStack(
                                         photos = currentBatch,
                                         currentIndex = currentIndex,
+                                        showFileSize = currentMode == SamplingMode.LARGE_PHOTO_CLEANUP,
                                         onClickPhoto = { photo ->
                                             HapticFeedback.click(this@MainActivity)
                                             viewingZoomFocus = null
@@ -1240,7 +1316,7 @@ class MainActivity : ComponentActivity() {
                                             currentMode = newMode
                                             selectedAlbumBucket = null
                                             selectedMonthBucket = null
-                                            reloadBatch(newMode)
+                                            reloadBatch(newMode, refreshLibrary = newMode == SamplingMode.LARGE_PHOTO_CLEANUP)
                                         }
                                     }
                                 },
@@ -1328,15 +1404,10 @@ class MainActivity : ComponentActivity() {
             val wCol = cursor.getColumnIndexOrThrow(MediaStore.Images.Media.WIDTH)
             val hCol = cursor.getColumnIndexOrThrow(MediaStore.Images.Media.HEIGHT)
             val bucketCol = cursor.getColumnIndexOrThrow(MediaStore.Images.Media.BUCKET_DISPLAY_NAME)
-            val ctCol = cursor.getColumnIndex("color_transfer")
-            val hdrCol = cursor.getColumnIndex("is_hdr")
 
             while (cursor.moveToNext()) {
                 val id = cursor.getLong(idCol)
                 val itemUri = ContentUris.withAppendedId(uri, id)
-                var isHdr = false
-                if (ctCol >= 0 && cursor.getInt(ctCol) >= 6) isHdr = true
-                if (hdrCol >= 0 && cursor.getInt(hdrCol) > 0) isHdr = true
 
                 list.add(
                     PhotoItem(
@@ -1348,9 +1419,7 @@ class MainActivity : ComponentActivity() {
                         size = cursor.getLong(sizeCol),
                         width = cursor.getInt(wCol),
                         height = cursor.getInt(hCol),
-                        bucketName = cursor.getString(bucketCol),
-                        isLivePhoto = false,
-                        isHdr = isHdr
+                        bucketName = cursor.getString(bucketCol)
                     )
                 )
             }

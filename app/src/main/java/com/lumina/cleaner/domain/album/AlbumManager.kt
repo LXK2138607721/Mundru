@@ -3,7 +3,6 @@ package com.lumina.cleaner.domain.album
 import android.content.ContentResolver
 import android.content.Context
 import android.net.Uri
-import android.os.Build
 import android.provider.MediaStore
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
@@ -11,8 +10,7 @@ import kotlinx.coroutines.withContext
 data class AlbumInfo(
     val name: String,
     val count: Int,
-    val coverUri: Uri?,
-    val relativePath: String?
+    val coverUri: Uri?
 )
 
 /**
@@ -34,12 +32,10 @@ class AlbumManager(private val context: Context) {
      */
     suspend fun getAvailableAlbums(): List<AlbumInfo> = withContext(Dispatchers.IO) {
         val albumMap = mutableMapOf<String, Pair<Int, Uri?>>()
-        val pathMap = mutableMapOf<String, String>()
 
         val projection = arrayOf(
             MediaStore.Images.Media._ID,
-            MediaStore.Images.Media.BUCKET_DISPLAY_NAME,
-            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) MediaStore.Images.Media.RELATIVE_PATH else MediaStore.Images.Media.DATA
+            MediaStore.Images.Media.BUCKET_DISPLAY_NAME
         )
 
         try {
@@ -52,20 +48,14 @@ class AlbumManager(private val context: Context) {
             )?.use { cursor ->
                 val idCol = cursor.getColumnIndex(MediaStore.Images.Media._ID)
                 val bucketCol = cursor.getColumnIndex(MediaStore.Images.Media.BUCKET_DISPLAY_NAME)
-                val pathCol = cursor.getColumnIndex(
-                    if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) MediaStore.Images.Media.RELATIVE_PATH else MediaStore.Images.Media.DATA
-                )
-
                 while (cursor.moveToNext()) {
                     val bucketName = cursor.getString(bucketCol) ?: continue
                     val id = cursor.getLong(idCol)
                     val uri = Uri.withAppendedPath(MediaStore.Images.Media.EXTERNAL_CONTENT_URI, id.toString())
-                    val path = if (pathCol >= 0) cursor.getString(pathCol) else null
 
                     val current = albumMap[bucketName]
                     if (current == null) {
                         albumMap[bucketName] = 1 to uri
-                        if (path != null) pathMap[bucketName] = path
                     } else {
                         albumMap[bucketName] = (current.first + 1) to current.second
                     }
@@ -79,8 +69,7 @@ class AlbumManager(private val context: Context) {
                 AlbumInfo(
                     name = name,
                     count = pair.first,
-                    coverUri = pair.second,
-                    relativePath = pathMap[name]
+                    coverUri = pair.second
                 )
             )
         }

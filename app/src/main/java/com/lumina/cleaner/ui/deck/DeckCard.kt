@@ -17,6 +17,7 @@ import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.key
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberUpdatedState
@@ -49,6 +50,7 @@ import androidx.compose.ui.unit.sp
 import coil.compose.AsyncImage
 import com.lumina.cleaner.core.model.PhotoItem
 import com.lumina.cleaner.core.util.HapticFeedback
+import com.lumina.cleaner.core.util.formatFileSize
 import com.lumina.cleaner.ui.motion.MotionPhotoPlayer
 import com.lumina.cleaner.ui.motion.MotionScaleType
 import com.lumina.cleaner.ui.viewer.PhotoTransform
@@ -110,7 +112,9 @@ fun DeckCard(
     depthBlurRadiusDp: () -> Float = { 0f },
     depthScrimAlpha: () -> Float = { 0f },
     smoothOutline: Boolean = false,
-    cacheMovingCard: Boolean = false
+    cacheMovingCard: Boolean = false,
+    showFileSize: Boolean = false,
+    isFront: Boolean = enableGestures
 ) {
     val context = LocalContext.current
     val density = LocalDensity.current
@@ -128,9 +132,9 @@ fun DeckCard(
     val reuseMovingLayer = cacheMovingCard && !photo.isLivePhoto && !photo.isHdr && !animatedFace
 
     // 点击播放单次标志
-    var isLivePlaying by remember(photo.id) { mutableStateOf(false) }
+    var isLivePlaying by remember(photo.id, isFront) { mutableStateOf(false) }
     // 按住卡片主体临时预览标志
-    var isLivePressing by remember(photo.id) { mutableStateOf(false) }
+    var isLivePressing by remember(photo.id, isFront) { mutableStateOf(false) }
     // 合成播放状态：点击播放单次 或 按住临时播
     val isPlayingLive = isLivePlaying || isLivePressing
 
@@ -217,19 +221,22 @@ fun DeckCard(
 
             // 实况照片播放器层（播放激活时平滑浮现渲染，保持等比裁切，绝不拉伸变形）
             if (photo.isLivePhoto && photo.motionVideoLength > 0) {
-                MotionPhotoPlayer(
-                    imageUri = photo.uri,
-                    videoOffset = photo.motionVideoOffset,
-                    videoLength = photo.motionVideoLength,
-                    isPlaying = isPlayingLive,
-                    scaleType = MotionScaleType.CROP,
-                    photoWidth = photo.width,
-                    photoHeight = photo.height,
-                    onPlaybackComplete = {
-                        isLivePlaying = false
-                    },
-                    modifier = Modifier.fillMaxSize()
-                )
+                // A retained card keeps its image, but never retains an active player offstage.
+                key(isFront) {
+                    MotionPhotoPlayer(
+                        imageUri = photo.uri,
+                        videoOffset = photo.motionVideoOffset,
+                        videoLength = photo.motionVideoLength,
+                        isPlaying = isPlayingLive,
+                        scaleType = MotionScaleType.CROP,
+                        photoWidth = photo.width,
+                        photoHeight = photo.height,
+                        onPlaybackComplete = {
+                            isLivePlaying = false
+                        },
+                        modifier = Modifier.fillMaxSize()
+                    )
+                }
             }
 
             val isGif = photo.displayName.endsWith(".gif", ignoreCase = true)
@@ -337,6 +344,21 @@ fun DeckCard(
                         }
                     }
                 }
+            }
+
+            if (showFileSize) {
+                val sizeLabel = remember(photo.size) { formatFileSize(photo.size) }
+                Text(
+                    text = sizeLabel,
+                    fontSize = 12.sp,
+                    fontWeight = FontWeight.SemiBold,
+                    color = Color.White,
+                    modifier = Modifier
+                        .align(Alignment.BottomStart)
+                        .padding(16.dp)
+                        .background(Color.Black.copy(alpha = 0.65f), RoundedCornerShape(8.dp))
+                        .padding(horizontal = 8.dp, vertical = 4.dp)
+                )
             }
 
             // API 28~30 降级遮罩：仅在 Android 12 以下渲染，通过动态 alpha 降低对比度，不拦截事件

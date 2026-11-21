@@ -93,15 +93,7 @@ interface PhotoDao {
     @Query("SELECT * FROM photos WHERE id = :id LIMIT 1")
     suspend fun getPhotoById(id: Long): PhotoEntity?
 
-    /**
-     * 物理删除成功后根据 PhotoId 集合从回收站彻底清除
-     */
-    @Query("DELETE FROM local_trash WHERE photoId IN (:photoIds)")
-    suspend fun deleteFromTrash(photoIds: List<Long>)
-
-    /**
-     * 物理删除成功后根据 URI 集合兜底销毁，彻底根绝幽灵残留
-     */
+    /** 仅移除与本次系统操作相符的 URI。 */
     @Query("DELETE FROM local_trash WHERE uriString IN (:uriStrings)")
     suspend fun deleteFromTrashByUris(uriStrings: List<String>)
 }

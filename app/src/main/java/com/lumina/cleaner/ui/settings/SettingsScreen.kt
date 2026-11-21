@@ -63,6 +63,7 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.lumina.cleaner.core.util.HapticFeedback
 import com.lumina.cleaner.core.util.HapticIntensity
+import com.lumina.cleaner.core.util.formatFileSize
 import com.lumina.cleaner.ui.theme.AppThemeMode
 import androidx.compose.material.icons.rounded.Palette
 
@@ -215,7 +216,7 @@ fun SettingsScreen(
                         horizontalArrangement = Arrangement.SpaceBetween
                     ) {
                         StatItem(title = "已审阅", value = "$totalReviewed 张")
-                        StatItem(title = "待释放", value = formatBytes(trashBytes))
+                        StatItem(title = "待释放", value = formatFileSize(trashBytes))
                         StatItem(title = "相册总量", value = "$totalPhotos 张")
                     }
                 }
@@ -924,13 +925,4 @@ private fun SectionTitle(title: String) {
         color = MaterialTheme.colorScheme.onSurfaceVariant,
         modifier = Modifier.padding(horizontal = 24.dp, vertical = 6.dp)
     )
-}
-
-private fun formatBytes(bytes: Long): String {
-    return when {
-        bytes < 1024 -> "$bytes B"
-        bytes < 1024 * 1024 -> String.format("%.1f KB", bytes / 1024.0)
-        bytes < 1024 * 1024 * 1024 -> String.format("%.1f MB", bytes / (1024.0 * 1024.0))
-        else -> String.format("%.2f GB", bytes / (1024.0 * 1024.0 * 1024.0))
-    }
 }
