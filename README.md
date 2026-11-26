@@ -8,20 +8,20 @@
 [![Kotlin](https://img.shields.io/badge/Kotlin-2.1.0-7F52FF?style=flat-square&logo=kotlin&logoColor=white)](#)
 [![Jetpack Compose](https://img.shields.io/badge/Compose-BOM%202024.12.01-4285F4?style=flat-square&logo=jetpackcompose&logoColor=white)](#)
 [![Privacy](https://img.shields.io/badge/Internet%20Permission-0%20(Pure%20Offline)-00C853?style=flat-square)](#)
-[![Package Size](https://img.shields.io/badge/APK%20Size-~3.5%20MB%20(R8%20Minified)-blue?style=flat-square)](#)
+[![Package Size](https://img.shields.io/badge/APK%20Size-~3.3%20MB%20(R8%20Minified)-blue?style=flat-square)](#)
 [![Developer](https://img.shields.io/badge/Developer-Muran-orange?style=flat-square)](#)
 
 </div>
 
 ---
 
-## ✦ 最新版本：v1.5.0
+## ✦ 最新版本：v1.6.0
 
-[下载安装包 Mundru.apk](https://github.com/LXK2138607721/Mundru/releases/download/v1.5.0/Mundru.apk) · [本次更新说明](RELEASE_NOTES_v1.5.0.md)
+[下载安装包 Mundru.apk](https://github.com/LXK2138607721/Mundru/releases/download/v1.6.0/Mundru.apk) · [本次更新公告](RELEASE_NOTES_v1.6.0.md)
 
-新增「大图专清」，从最占空间的照片开始整理；连续翻图更顺，桌面换上了小猫图标。
+全新液态玻璃界面、漩涡刷新与全套物理动效；升级暗房全屏看图、可试玩新手引导、回收站免反复弹白框直删与顺滑波浪补位，连续快滑更顺更省内存。
 
-**旧版安装提醒：** 1.5.0 更换了签名，1.0.0–1.4.0 需卸载后再安装。卸载会清空应用内记录和设置，不会删除系统相册中的照片。
+**升级说明：** 沿用 1.5.0 正式签名，已安装 1.5.0 的用户可直接覆盖安装；仍在使用 1.0.0–1.4.0 的用户需先卸载旧版再安装（卸载仅清除应用内记录和设置，不会删除手机相册中的照片）。
 
 ---
 
@@ -57,11 +57,12 @@ Mundru 摒弃了一切社交干扰、商业云推销与臃肿算法，回归相�
 - 深度装配 Coil 原生 `ImageDecoderDecoder` 与 `GifDecoder`；
 - 整理卡片堆叠流与大图查看器中全自动循环播放，并附带专属极简紫色 `GIF` 状态徽标。
 
-### 5. 🧭 四维智能抽样与专清引擎
-- **随机漫游（Random Walk）**：均衡时间分层抽样 + 24 小时严格冷却，保护期内不重复推送已审阅照片；
-- **时光胶囊（Time Capsule）**：优先半年前的老照片与“那年今日”；没有半年老照片时，沿用至少 30 天前照片的降级规则；
+### 5. 🧭 五维智能抽样与专清引擎
+- **随机漫步（Random Walk）**：均衡时间分层抽样 + 24 小时冷却与相似连拍分散，保护期内不重复推送已审阅照片；
+- **时光考古（Time Capsule）**：优先半年前的老照片与“那年今日”；没有半年老照片时，沿用至少 30 天前照片的降级规则；
 - **图集专清（Album Cleanup）**：按照片数量降序自动聚类系统图集，支持对膨胀相册开展靶向专清；
-- **月份专清（Month Cleanup）**：按历史年月时间轴无缝穿梭，专治某年某月的历史堆积。
+- **月份专清（Month Cleanup）**：按历史年月时间轴无缝穿梭，专治某年某月的历史堆积；
+- **大图专清（Large Photo Cleanup）**：按文件大小优先整理最占空间的照片，卡片直接显示实际体积。
 
 ### 6. 🗑️ 真实物理删除 · 拒绝幽灵残留
 - 深度适配 Android 11+ Scoped Storage 存储安全规范；
@@ -130,7 +131,7 @@ app/src/main/java/com/lumina/cleaner/
 | **系统兼容** | minSdk 28 (Android 9.0 ~ Android 16+） | compileSdk 35，覆盖绝大多数主流机型与前沿系统 |
 | **本地数据库** | Room SQLite 2.6.1 (WAL 模式) | 毫秒级全库索引与状态管理 |
 | **图片加载与动图** | Coil 2.7.0 + ImageDecoderDecoder | 原生硬件位图渲染与 GIF 动图原生支持 |
-| **代码混淆与优化** | R8 Full Mode (Shrink Resources + Minify) | 编译输出体积仅约 3.5 MB |
+| **代码混淆与优化** | R8 Full Mode (Shrink Resources + Minify) | 编译输出体积仅约 3.3 MB |
 | **权限清单** | 0 个 `INTERNET` 权限 | 仅声明系统必要相册读取与振动硬件权限 |
 
 ---
@@ -173,7 +174,7 @@ cd Mundru
 ## ✦ 签名与发布
 
 - **开发者**：沐然 (Muran)
-- **1.5.0 公开证书指纹（不是私钥）**：
+- **1.5.0+ 公开证书指纹（不是私钥）**：
   - `SHA1: 98:C4:7A:CA:50:3D:E6:59:AD:D3:77:8B:A6:30:70:BA:2C:A1:6A:F3`
   - `SHA256: 5A:1C:8C:18:1E:D9:E6:40:6C:47:D2:7F:B4:40:CE:F0:85:1C:69:F1:48:BE:58:74:86:01:23:4A:F3:B3:90:DC`
 - **有效期**：至 2061 年 11 月 11 日
