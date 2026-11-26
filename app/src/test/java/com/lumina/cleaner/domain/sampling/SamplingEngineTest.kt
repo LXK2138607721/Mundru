@@ -153,4 +153,79 @@ class SamplingEngineTest {
         assertEquals(time("2024-02-01"), buckets[1].startMillis)
         assertEquals(time("2024-03-01"), buckets[1].endMillis)
     }
+
+    @Test fun `adaptive tiered cooldown stretches by viewCount 24h 7d 30d 90d`() {
+        assertEquals(day, SamplingEngine.cooldownWindowMs(0))
+        assertEquals(day, SamplingEngine.cooldownWindowMs(1))
+        assertEquals(7 * day, SamplingEngine.cooldownWindowMs(2))
+        assertEquals(30 * day, SamplingEngine.cooldownWindowMs(3))
+        assertEquals(90 * day, SamplingEngine.cooldownWindowMs(4))
+        assertEquals(90 * day, SamplingEngine.cooldownWindowMs(9))
+
+        val photos = (1L..4L).map { photo(it) }
+        val viewCounts = mapOf(1L to 1, 2L to 2, 3L to 3, 4L to 4)
+        // 经过 8 天后：viewCount=1 (24h) 与 viewCount=2 (7d) 解禁，viewCount=3 (30d) 与 4 (90d) 仍在冷却
+        val history = photos.associate { it.id to (now - 8 * day) }
+        val batch = engine.getStratifiedRandomBatch(photos, 15, history, viewCountMap = viewCounts)
+        assertEquals(setOf(1L, 2L), batch.map { it.id }.toSet())
+    }
+
+    @Test fun `unreviewed photos are prioritized over previously reviewed photos inside strata`() {
+        val photos = (1L..50L).map { photo(it, now - (100 - it) * day) }
+        // 1..15 为从未看过的新照片 (viewCount = 0)，16..50 为已过期冷却的旧看图 (viewCount = 1)
+        val viewCounts = (16L..50L).associateWith { 1 }
+        val expiredHistory = (16L..50L).associateWith { now - 10 * day }
+
+        val batch = engine.getStratifiedRandomBatch(
+            allPhotos = photos,
+            batchSize = 15,
+            viewHistory = expiredHistory,
+            viewCountMap = viewCounts
+        )
+        // 第一个分层全部由未审阅照片构成，应完整入选 1..15 中相应比例且显著偏向未审阅项
+        val unreviewedCount = batch.count { it.id in 1L..15L }
+        assertTrue("Expected unreviewed photos to be prioritized, got $unreviewedCount", unreviewedCount >= 6)
+    }
+
+    @Test fun `junk value radar identifies old screenshots social cache and bursts`() {
+        val oldShot = photo(1, now - 45 * day, album = "Screenshots").copy(displayName = "Screenshot_2025.png")
+        val freshShot = photo(2, now - 2 * day, album = "Screenshots").copy(displayName = "Screenshot_new.png")
+        val oldWechat = photo(3, now - 20 * day, album = "WeChat")
+        val normalCam = photo(4, now - 120 * day, album = "Camera")
+
+        assertTrue(engine.isJunkCandidate(oldShot, emptySet(), now))
+        assertFalse(engine.isJunkCandidate(freshShot, emptySet(), now))
+        assertTrue(engine.isJunkCandidate(oldWechat, emptySet(), now))
+        assertFalse(engine.isJunkCandidate(normalCam, emptySet(), now))
+        assertTrue(engine.isJunkCandidate(normalCam, setOf(4L), now))
+    }
+
+    @Test fun `burst shots and dHash similar pairs are grouped strictly adjacent in random walk`() {
+        val base = now - 60 * day
+        val burst1 = photo(10, base, album = "Camera")
+        val burst2 = photo(11, base + 1_500L, album = "Camera")
+        val burst3 = photo(12, base + 3_000L, album = "Camera")
+        val simA = photo(20, now - 120 * day, album = "Travel")
+        val simB = photo(21, now - 30 * day, album = "Travel")
+        val others = (1L..8L).map { photo(it, now - (it * 15) * day, album = "Misc$it") }
+
+        val pool = others + listOf(burst1, burst2, burst3, simA, simB)
+        val dHashes = mapOf(
+            20L to 0x0F0F_0F0F_0F0F_0F0FL,
+            21L to 0x0F0F_0F0F_0F0F_0F0EL // 汉明距离 = 1 <= 8
+        )
+
+        repeat(10) {
+            val batch = engine.getStratifiedRandomBatch(pool, 15, emptyMap(), dHashMap = dHashes)
+            assertEquals(pool.size, batch.size)
+
+            val bIdx = listOf(10L, 11L, 12L).map { id -> batch.indexOfFirst { it.id == id } }
+            assertEquals("Burst shots must stay strictly consecutive & chronological: $bIdx",
+                listOf(bIdx[0], bIdx[0] + 1, bIdx[0] + 2), bIdx)
+
+            val sIdxA = batch.indexOfFirst { it.id == 20L }
+            val sIdxB = batch.indexOfFirst { it.id == 21L }
+            assertEquals("dHash similar pair must be strictly adjacent", 1, kotlin.math.abs(sIdxA - sIdxB))
+        }
+    }
 }

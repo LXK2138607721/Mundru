@@ -8,7 +8,7 @@ import androidx.room.PrimaryKey
  * Mundru 数据库持久化实体定义 (Room Entities)
  *
  * 品牌释义：Mundru 源自格陵兰语（Greenlandic），意为「擦掉 / 擦除」。
- * 架构定位：构建纯本地离线照片与回收站索引，支持数万张相片毫秒级状态查询与 24h 冷却衰减。
+ * 架构定位：构建纯本地离线照片与回收站索引，支持数万张相片毫秒级状态查询、阶梯冷却衰减与 64-bit dHash 相似缓存。
  */
 @Entity(
     tableName = "photos",
@@ -34,7 +34,8 @@ data class PhotoEntity(
     val motionVideoLength: Long = 0L,
     val isHdr: Boolean = false,
     val viewCount: Int = 0,
-    val lastViewedAt: Long = 0L
+    val lastViewedAt: Long = 0L,
+    val dHash: Long? = null
 )
 
 /**

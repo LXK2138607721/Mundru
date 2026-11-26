@@ -4,6 +4,7 @@ import android.content.ContentResolver
 import android.content.Context
 import android.net.Uri
 import android.provider.MediaStore
+import com.lumina.cleaner.core.model.PhotoItem
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 
@@ -26,6 +27,35 @@ data class AlbumInfo(
 class AlbumManager(private val context: Context) {
 
     private val contentResolver: ContentResolver = context.contentResolver
+
+    companion object {
+        /**
+         * 直接基于已加载的内存相册快照即时聚合图集（零 MediaStore IPC，3000+ 照片 < 0.5ms）。
+         * 快照已按 DATE_MODIFIED DESC 排序，因此同图集首张照片即为最新封面。
+         */
+        fun buildAlbumsFromPhotos(photos: List<PhotoItem>): List<AlbumInfo> {
+            if (photos.isEmpty()) return emptyList()
+            val counts = HashMap<String, Int>(24)
+            val covers = HashMap<String, Uri>(24)
+            for (photo in photos) {
+                val bucket = photo.bucketName?.takeIf { it.isNotBlank() } ?: continue
+                val prev = counts[bucket]
+                if (prev == null) {
+                    counts[bucket] = 1
+                    covers[bucket] = photo.uri
+                } else {
+                    counts[bucket] = prev + 1
+                }
+            }
+            return counts.entries.map { (name, count) ->
+                AlbumInfo(
+                    name = name,
+                    count = count,
+                    coverUri = covers[name]
+                )
+            }.sortedByDescending { it.count }
+        }
+    }
 
     /**
      * 获取所有图集（合并系统相册，按照片容量降序返回）

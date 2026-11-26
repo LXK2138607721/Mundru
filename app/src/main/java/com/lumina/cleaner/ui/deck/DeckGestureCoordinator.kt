@@ -79,6 +79,12 @@ class DeckGestureCoordinator(
     var isCommittingSwipe: Boolean = false
         private set
 
+    // 进行中的提交回调与方向（支持用户在新照片出现瞬间无缝打断收尾并立刻接管点击/滑动，彻底消除顿感与断触）
+    private var pendingCommitAction: (() -> Unit)? = null
+    private var pendingImpactAction: (() -> Unit)? = null
+    var committingDirection: ReleaseAction? = null
+        private set
+
     // G1: 同步手势逻辑坐标与状态（与 UI 线程/输入事件严格同序）
     var dragLogicalX: Float = 0f
         private set
@@ -114,6 +120,9 @@ class DeckGestureCoordinator(
         currentPhotoId = photoId
         gestureEpoch++
         isCommittingSwipe = false
+        pendingCommitAction = null
+        pendingImpactAction = null
+        committingDirection = null
         isDragging = false
         dragLogicalX = 0f
         dragLogicalY = 0f
@@ -352,6 +361,28 @@ class DeckGestureCoordinator(
     }
 
     /**
+     * 系统级无缝可打断提交：
+     * 当上一张卡片已经起飞/收尾、用户立刻再次触控屏幕（打算立刻点击大图或连续快滑下一张）时，
+     * 立即同步落定上一张的待提交回调（保证幂等仅触发一次），瞬间释放手势锁，杜绝任何顿感与断触。
+     * @return 若成功刷新并落定了一个进行中的提交，返回其方向；否则返回 null。
+     */
+    fun flushCommitIfInFlight(): ReleaseAction? {
+        if (!isCommittingSwipe) return null
+        val dir = committingDirection
+        val impact = pendingImpactAction
+        val commit = pendingCommitAction
+        pendingImpactAction = null
+        pendingCommitAction = null
+        committingDirection = null
+        isCommittingSwipe = false
+        cancelAllJobs()
+        gestureEpoch++
+        impact?.invoke()
+        commit?.invoke()
+        return dir
+    }
+
+    /**
      * 执行切图提交并发等待（解决 G1: 从逻辑位移起飞；解决 R3/F1/H2: 身份守卫与双动画并发同步）
      */
     fun commitSwipe(
@@ -362,6 +393,8 @@ class DeckGestureCoordinator(
         targetDepthP: Float,
         startOffset: Float = animOffset.value,
         depthSpring: AnimationSpec<Float> = commitSpring,
+        initialVelocity: Float = 0f,
+        direction: ReleaseAction = ReleaseAction.COMMIT_LEFT,
         onCommitSuccess: () -> Unit
     ) {
         if (isCommittingSwipe) return
@@ -372,19 +405,86 @@ class DeckGestureCoordinator(
 
         val capturedPhotoId = currentPhotoId
         val capturedEpoch = gestureEpoch
+        committingDirection = direction
+        pendingImpactAction = null
+        pendingCommitAction = onCommitSuccess
 
         activeSwipeJob = scope.launch {
             try {
-                // 确保动画从逻辑位移处连续起飞
+                // 确保动画从逻辑位移处连续起飞，并继承真实甩出初速度
                 animOffset.snapTo(startOffset)
                 coroutineScope {
                     launch { animDepthProgress.animateTo(targetDepthP, depthSpring) }
-                    launch { animOffset.animateTo(targetOffset, commitSpring) }
+                    launch {
+                        animOffset.animateTo(
+                            targetValue = targetOffset,
+                            animationSpec = commitSpring,
+                            initialVelocity = initialVelocity
+                        )
+                    }
                 }
 
-                // 身份与代次守卫
+                // 身份与代次守卫（若已被 flushCommitIfInFlight 提前落定则 pendingCommitAction 为 null，绝不重复触发）
                 if (currentPhotoId == capturedPhotoId && gestureEpoch == capturedEpoch) {
-                    onCommitSuccess()
+                    val commit = pendingCommitAction
+                    pendingCommitAction = null
+                    committingDirection = null
+                    isCommittingSwipe = false
+                    commit?.invoke()
+                }
+            } catch (_: CancellationException) {}
+        }
+    }
+
+    /**
+     * 执行上滑回收三段式神灯吸入弧线提交：
+     * - 并发驱动弧线飞行 (arcProgress: 0f -> 1f) 与底层景深升格 (animDepthProgress -> 1f)；
+     * - 在弧线恰好命中右上角垃圾桶锚点 (arcProgress == 1f) 的同一帧立刻触发 [onArcImpact]（重触感+掀盖合拢+果冻撞击）；
+     * - 支持连续快滑无缝打断落定，保证 [onArcImpact] 与 [onCommitSuccess] 严格幂等且只触发一次。
+     */
+    fun commitTrashArc(
+        arcProgress: Animatable<Float, *>,
+        animDepthProgress: Animatable<Float, *>,
+        depthSpring: AnimationSpec<Float>,
+        durationMillis: Int,
+        onArcImpact: () -> Unit,
+        onCommitSuccess: () -> Unit
+    ) {
+        if (isCommittingSwipe) return
+        isCommittingSwipe = true
+        isDragging = false
+        cancelAllJobs()
+        gestureEpoch++
+
+        val capturedPhotoId = currentPhotoId
+        val capturedEpoch = gestureEpoch
+        committingDirection = ReleaseAction.COMMIT_UP
+        pendingImpactAction = onArcImpact
+        pendingCommitAction = onCommitSuccess
+
+        activeSwipeJob = scope.launch {
+            try {
+                arcProgress.snapTo(0f)
+                coroutineScope {
+                    launch { animDepthProgress.animateTo(1f, depthSpring) }
+                    launch {
+                        arcProgress.animateTo(
+                            targetValue = 1f,
+                            animationSpec = tween(durationMillis = durationMillis, easing = LinearEasing)
+                        )
+                        if (currentPhotoId == capturedPhotoId && gestureEpoch == capturedEpoch) {
+                            val impact = pendingImpactAction
+                            pendingImpactAction = null
+                            impact?.invoke()
+                        }
+                    }
+                }
+                if (currentPhotoId == capturedPhotoId && gestureEpoch == capturedEpoch) {
+                    val commit = pendingCommitAction
+                    pendingCommitAction = null
+                    committingDirection = null
+                    isCommittingSwipe = false
+                    commit?.invoke()
                 }
             } catch (_: CancellationException) {}
         }
@@ -402,6 +502,9 @@ class DeckGestureCoordinator(
         gestureEpoch++
         val capturedPhotoId = currentPhotoId
         val capturedEpoch = gestureEpoch
+        committingDirection = ReleaseAction.COMMIT_RIGHT
+        pendingImpactAction = null
+        pendingCommitAction = onCommitSuccess
 
         activeSwipeJob = scope.launch {
             try {
@@ -410,7 +513,11 @@ class DeckGestureCoordinator(
                     animationSpec = tween(DeckReturnModel.DURATION_MILLIS, easing = LinearEasing)
                 )
                 if (currentPhotoId == capturedPhotoId && gestureEpoch == capturedEpoch) {
-                    onCommitSuccess()
+                    val commit = pendingCommitAction
+                    pendingCommitAction = null
+                    committingDirection = null
+                    isCommittingSwipe = false
+                    commit?.invoke()
                 }
             } catch (_: CancellationException) {}
         }

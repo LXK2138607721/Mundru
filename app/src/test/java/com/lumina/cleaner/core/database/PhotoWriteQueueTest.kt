@@ -98,4 +98,68 @@ class PhotoWriteQueueTest {
         assertEquals(12345L, persistedViewedAt)
         assertFalse(startupTrashed)
     }
+
+    @Test fun `concurrent producers across threads never drop writes and execute serially`() = runBlocking {
+        val queue = PhotoWriteQueue(this, Dispatchers.Default)
+        val completed = java.util.concurrent.atomic.AtomicInteger(0)
+        val activeWriters = java.util.concurrent.atomic.AtomicInteger(0)
+        val overlapDetected = java.util.concurrent.atomic.AtomicBoolean(false)
+
+        val producers = (0 until 8).map { worker ->
+            launch(Dispatchers.Default) {
+                repeat(25) {
+                    queue.enqueue {
+                        if (activeWriters.incrementAndGet() > 1) {
+                            overlapDetected.set(true)
+                        }
+                        completed.incrementAndGet()
+                        activeWriters.decrementAndGet()
+                    }
+                }
+            }
+        }
+        producers.forEach { it.join() }
+        queue.awaitPendingWrites()
+        assertFalse("Queued writes must never overlap", overlapDetected.get())
+        assertEquals(200, completed.get())
+    }
+
+    @Test fun `review coalescer batches rapid left swipes and preserves strict order before trash`() = runBlocking {
+        val queue = PhotoWriteQueue(this, Dispatchers.Unconfined)
+        val committedBatches = mutableListOf<List<Pair<Long, Long>>>()
+        val orderLog = mutableListOf<String>()
+        val coalescer = ReviewWriteCoalescer(
+            writeQueue = queue,
+            scope = this,
+            commitBatch = { batch ->
+                committedBatches.add(batch)
+                orderLog.add("reviews:${batch.map { it.first }}")
+            },
+            flushThreshold = 4,
+            flushDelayMs = 60_000L,
+            delayDispatcher = Dispatchers.Default
+        )
+
+        // 4 rapid swipes trigger exactly 1 threshold-batched transaction
+        coalescer.recordReview(1L, 100L)
+        coalescer.recordReview(2L, 101L)
+        coalescer.recordReview(3L, 102L)
+        assertTrue(committedBatches.isEmpty())
+        coalescer.recordReview(4L, 103L)
+        queue.awaitPendingWrites()
+        assertEquals(1, committedBatches.size)
+        assertEquals(listOf(1L, 2L, 3L, 4L), committedBatches[0].map { it.first })
+
+        // 2 more left swipes followed by an up-swipe trash: flushNow ensures reviews land BEFORE trash
+        coalescer.recordReview(5L, 104L)
+        coalescer.recordReview(6L, 105L)
+        coalescer.flushNow()
+        queue.enqueue { orderLog.add("trash:7") }
+        queue.awaitPendingWrites()
+
+        assertEquals(
+            listOf("reviews:[1, 2, 3, 4]", "reviews:[5, 6]", "trash:7"),
+            orderLog
+        )
+    }
 }

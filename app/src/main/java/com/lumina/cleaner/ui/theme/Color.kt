@@ -2,23 +2,23 @@ package com.lumina.cleaner.ui.theme
 
 import androidx.compose.ui.graphics.Color
 
-// Mundru Light Mode: 纯净纸质白基底 + 瑞士排版深炭黑 (格陵兰语 Mundru：擦除与沉淀)
-val MundruLightBackground = Color(0xFFF9F9FB)
+// Mundru Light Mode: 瑞士美术馆宣纸白 + 纯炭墨黑 (100% 零蓝色，把全部色彩舞台让给相片本身)
+val MundruLightBackground = Color(0xFFF7F7F5)
 val MundruLightSurface = Color(0xFFFFFFFF)
-val MundruLightSurfaceVariant = Color(0xFFEBEBF0)
-val MundruLightTextPrimary = Color(0xFF1A1A1E)
-val MundruLightTextSecondary = Color(0xFF6B6B78)
-val MundruLightAccent = Color(0xFF3872E8) // 沉静克制的莫兰迪蓝
-val MundruLightTrash = Color(0xFFE54D2E)  // 醒目但不刺眼的朱砂红
+val MundruLightSurfaceVariant = Color(0xFFEBEBE9)
+val MundruLightTextPrimary = Color(0xFF141518)
+val MundruLightTextSecondary = Color(0xFF6B6C74)
+val MundruLightAccent = Color(0xFF141518) // 纯炭墨黑（与原版黑白小猫 Logo 同源）
+val MundruLightTrash = Color(0xFFD9412C)  // 克制沉稳的朱砂红（仅用于清理/删除语义）
 
-// Mundru Dark Mode: 深度空灵炭黑 + 微灰表面 + 高对比度交互层 (彻底根除暗色模式发灰与按钮隐形缺陷)
-val MundruDarkBackground = Color(0xFF0E0E12)
-val MundruDarkSurface = Color(0xFF1B1C22)
-val MundruDarkSurfaceVariant = Color(0xFF2C2F38) // 提升对比度，按钮与操作卡片边缘清晰显眼
-val MundruDarkTextPrimary = Color(0xFFF4F4F7)   // 纯净高对比白
-val MundruDarkTextSecondary = Color(0xFFB0B4C3) // 大幅提升暗色模式副文本与未选中图标亮度（对比度提升65%）
-val MundruDarkAccent = Color(0xFF6B9BFF)        // 明快清晰的主题蓝
-val MundruDarkTrash = Color(0xFFFF5252)
+// Mundru Dark Mode: 深度曜石炭黑 + 纯象牙白高对比交互层 (零蓝色、零发灰)
+val MundruDarkBackground = Color(0xFF0C0D10)
+val MundruDarkSurface = Color(0xFF17181D)
+val MundruDarkSurfaceVariant = Color(0xFF282A32)
+val MundruDarkTextPrimary = Color(0xFFF4F4F6)
+val MundruDarkTextSecondary = Color(0xFFA0A3AE)
+val MundruDarkAccent = Color(0xFFF4F4F6)  // 纯象牙白（配合炭黑反色文字，暗房级高对比）
+val MundruDarkTrash = Color(0xFFFF5A4E)
 
 // 兼容别名
 val LuminaLightBackground = MundruLightBackground

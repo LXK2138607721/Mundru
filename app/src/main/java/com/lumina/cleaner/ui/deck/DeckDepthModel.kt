@@ -34,6 +34,18 @@ data class DeckDepthMetrics(
 )
 
 /**
+ * 第四层地平线预备卡片（即将进入第三层）的几何、模糊与透明度参数。
+ * 用于在大图/高竖图位于第 4 张时，随第 1 张拖拽进度 1:1 丝滑显露或隐退，彻底消除切图瞬间的 1 帧突兀弹出。
+ */
+data class DeckFourthMetrics(
+    val scale: Float,
+    val offsetYDp: Float,
+    val blurDp: Float,
+    val scrimAlpha: Float,
+    val alpha: Float
+)
+
+/**
  * 卡片舞台底层景深与手势决策纯函数模型
  *
  * 统一管理拖拽预览进度、松手提交裁决、以及第二/第三层卡片的几何与模糊插值。
@@ -169,6 +181,25 @@ object DeckDepthModel {
             offsetYDp = 28f - 14f * p,
             blurDp = 16f - 4f * p,
             scrimAlpha = 0.26f - 0.08f * p
+        )
+    }
+
+    /**
+     * 第四层地平线卡片插值（连续衔接第三层静息态，0 突变交接）：
+     * - p = 0: scale=0.85, offsetYDp=42, blurDp=22, scrimAlpha=0.34, alpha=0.00（静息时完全隐形，不干扰三层视觉）
+     * - p = 1: scale=0.90, offsetYDp=28, blurDp=16, scrimAlpha=0.26, alpha=1.00（与第三层 p=0 像素级 100% 严丝合缝）
+     * - 透明度采用平滑 Hermite S 曲线（p <= 0.10 静默防微颤），来回拖拽不松手时可 1:1 丝滑显露与隐退。
+     */
+    fun interpolateFourthLayer(progress: Float): DeckFourthMetrics {
+        val p = progress.coerceIn(0f, 1f)
+        val alphaT = ((p - 0.10f) / 0.90f).coerceIn(0f, 1f)
+        val smoothAlpha = alphaT * alphaT * (3f - 2f * alphaT)
+        return DeckFourthMetrics(
+            scale = 0.85f + 0.05f * p,
+            offsetYDp = 42f - 14f * p,
+            blurDp = 22f - 6f * p,
+            scrimAlpha = 0.34f - 0.08f * p,
+            alpha = smoothAlpha
         )
     }
 }

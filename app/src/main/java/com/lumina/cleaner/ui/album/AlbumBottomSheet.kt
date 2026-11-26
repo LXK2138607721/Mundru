@@ -1,14 +1,19 @@
 package com.lumina.cleaner.ui.album
 
+import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.background
+import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.heightIn
+import androidx.compose.foundation.layout.navigationBarsPadding
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
@@ -16,192 +21,212 @@ import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.rounded.Add
+import androidx.compose.material.icons.rounded.Check
 import androidx.compose.material.icons.rounded.Folder
-import androidx.compose.material3.AlertDialog
-import androidx.compose.material3.Button
-import androidx.compose.material3.ButtonDefaults
-import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
-import androidx.compose.material3.ModalBottomSheet
-import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
-import androidx.compose.material3.TextButton
-import androidx.compose.material3.rememberModalBottomSheetState
 import androidx.compose.runtime.Composable
-import androidx.compose.runtime.getValue
-import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
-import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.graphics.Brush
+import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.luminance
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import coil.compose.AsyncImage
+import coil.request.ImageRequest
+import coil.size.Precision
+import coil.size.Scale
 import com.lumina.cleaner.core.util.HapticFeedback
 import com.lumina.cleaner.domain.album.AlbumInfo
+import com.lumina.cleaner.ui.glass.MundruBottomSheet
 
 /**
- * Mundru 图集选择抽屉弹层 (AlbumBottomSheet)
- * 品牌释义：Mundru 源自格陵兰语（Greenlandic），意为「擦掉 / 擦除」。
- * 核心功能：快速定向筛选系统图集与相册，开展专清模式整理。
- * 用于「图集专清」模式快速定向筛选与整理相册
+ * Mundru 图集专清选择抽屉 (AlbumBottomSheet)
+ * - 基于零窗口 IPC 的 120fps 页内 MundruBottomSheet，消除 DialogWindow 创建卡顿；
+ * - 封面缩略图严格锁定 144×144 采样与 Precision.INEXACT；
+ * - 选中图集先平滑收拢抽屉再交由主舞台漩涡换批。
  */
-@OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun AlbumBottomSheet(
     albums: List<AlbumInfo>,
+    selectedAlbum: String? = null,
     onSelectAlbum: (String) -> Unit,
     onDismiss: () -> Unit
 ) {
     val context = LocalContext.current
-    val sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true)
-    var showCreateDialog by remember { mutableStateOf(false) }
-    var newAlbumName by remember { mutableStateOf("") }
+    val isDark = MaterialTheme.colorScheme.background.luminance() < 0.5f
 
-    ModalBottomSheet(
-        onDismissRequest = onDismiss,
-        sheetState = sheetState,
-        containerColor = MaterialTheme.colorScheme.surface,
-        shape = RoundedCornerShape(topStart = 24.dp, topEnd = 24.dp)
-    ) {
+    val rowBaseBg = if (isDark) Color.White.copy(alpha = 0.055f) else Color.Black.copy(alpha = 0.032f)
+    val rowSelectedBg = if (isDark) Color.White.copy(alpha = 0.12f) else Color.Black.copy(alpha = 0.075f)
+    val rowBorderBrush = remember(isDark) {
+        Brush.linearGradient(
+            colors = if (isDark) {
+                listOf(Color.White.copy(alpha = 0.14f), Color.White.copy(alpha = 0.04f))
+            } else {
+                listOf(Color.White.copy(alpha = 0.90f), Color.Black.copy(alpha = 0.06f))
+            }
+        )
+    }
+
+    MundruBottomSheet(onDismiss = onDismiss) { dismissSmoothly ->
         Column(
             modifier = Modifier
                 .fillMaxWidth()
-                .padding(horizontal = 20.dp, vertical = 12.dp)
+                .navigationBarsPadding()
+                .padding(horizontal = 20.dp)
+                .padding(bottom = 18.dp)
         ) {
             Row(
-                modifier = Modifier.fillMaxWidth(),
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(horizontal = 4.dp),
                 horizontalArrangement = Arrangement.SpaceBetween,
                 verticalAlignment = Alignment.CenterVertically
             ) {
-                Column {
-                    Text(
-                        text = "选择专清图集",
-                        fontSize = 18.sp,
-                        fontWeight = FontWeight.Bold,
-                        color = MaterialTheme.colorScheme.onSurface
-                    )
-                    Text(
-                        text = "挑选特定图集，专注定向清理",
-                        fontSize = 12.sp,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant,
-                        maxLines = 1
-                    )
-                }
-
-                TextButton(onClick = { showCreateDialog = true }) {
-                    Icon(Icons.Rounded.Add, contentDescription = "Create", modifier = Modifier.size(18.dp), tint = MaterialTheme.colorScheme.onPrimary)
-                    Spacer(modifier = Modifier.width(4.dp))
-                    Text("新建图集", fontSize = 14.sp)
-                }
+                Text(
+                    text = "选择图集",
+                    fontSize = 18.sp,
+                    fontWeight = FontWeight.Bold,
+                    color = MaterialTheme.colorScheme.onSurface
+                )
+                Text(
+                    text = "${albums.size} 个图集",
+                    fontSize = 12.sp,
+                    fontWeight = FontWeight.Medium,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                )
             }
 
-            Spacer(modifier = Modifier.height(16.dp))
+            Spacer(modifier = Modifier.height(14.dp))
 
-            LazyColumn(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .height(380.dp),
-                verticalArrangement = Arrangement.spacedBy(8.dp)
-            ) {
-                items(albums) { album ->
-                    Row(
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .clip(RoundedCornerShape(14.dp))
-                            .background(MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.5f))
-                            .clickable {
-                                HapticFeedback.click(context)
-                                onSelectAlbum(album.name)
-                            }
-                            .padding(12.dp),
-                        verticalAlignment = Alignment.CenterVertically
-                    ) {
-                        Surface(
-                            shape = RoundedCornerShape(10.dp),
-                            color = MaterialTheme.colorScheme.surface,
-                            modifier = Modifier.size(48.dp)
-                        ) {
-                            if (album.coverUri != null) {
-                                AsyncImage(
-                                    model = album.coverUri,
-                                    contentDescription = album.name,
-                                    contentScale = ContentScale.Crop
-                                )
-                            } else {
-                                Box(contentAlignment = Alignment.Center) {
-                                    Icon(
-                                        Icons.Rounded.Folder,
-                                        contentDescription = null,
-                                        tint = MaterialTheme.colorScheme.primary,
-                                        modifier = Modifier.size(24.dp)
-                                    )
-                                }
+            if (albums.isEmpty()) {
+                Box(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .height(160.dp),
+                    contentAlignment = Alignment.Center
+                ) {
+                    Text(
+                        text = "暂无可选图集",
+                        fontSize = 14.sp,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                }
+            } else {
+                LazyColumn(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .heightIn(max = 400.dp),
+                    verticalArrangement = Arrangement.spacedBy(8.dp),
+                    contentPadding = PaddingValues(bottom = 4.dp)
+                ) {
+                    items(albums, key = { it.name }) { album ->
+                        val isSelected = album.name == selectedAlbum
+                        val rowShape = RoundedCornerShape(16.dp)
+                        val thumbRequest = remember(album.coverUri) {
+                            album.coverUri?.let { uri ->
+                                ImageRequest.Builder(context)
+                                    .data(uri)
+                                    .size(144, 144)
+                                    .scale(Scale.FILL)
+                                    .precision(Precision.INEXACT)
+                                    .crossfade(false)
+                                    .build()
                             }
                         }
 
-                        Spacer(modifier = Modifier.width(14.dp))
+                        Row(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .clip(rowShape)
+                                .background(if (isSelected) rowSelectedBg else rowBaseBg)
+                                .border(
+                                    width = if (isSelected) 0.85.dp else 0.6.dp,
+                                    brush = if (isSelected) {
+                                        Brush.linearGradient(
+                                            listOf(
+                                                MaterialTheme.colorScheme.onSurface.copy(alpha = if (isDark) 0.34f else 0.22f),
+                                                MaterialTheme.colorScheme.onSurface.copy(alpha = if (isDark) 0.14f else 0.10f)
+                                            )
+                                        )
+                                    } else rowBorderBrush,
+                                    shape = rowShape
+                                )
+                                .clickable {
+                                    HapticFeedback.click(context)
+                                    dismissSmoothly { onSelectAlbum(album.name) }
+                                }
+                                .padding(horizontal = 12.dp, vertical = 10.dp),
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            Surface(
+                                shape = RoundedCornerShape(12.dp),
+                                color = if (isDark) Color.White.copy(alpha = 0.08f) else Color.Black.copy(alpha = 0.05f),
+                                border = BorderStroke(
+                                    0.5.dp,
+                                    if (isDark) Color.White.copy(alpha = 0.12f) else Color.Black.copy(alpha = 0.06f)
+                                ),
+                                modifier = Modifier.size(46.dp)
+                            ) {
+                                if (thumbRequest != null) {
+                                    AsyncImage(
+                                        model = thumbRequest,
+                                        contentDescription = album.name,
+                                        contentScale = ContentScale.Crop
+                                    )
+                                } else {
+                                    Box(contentAlignment = Alignment.Center) {
+                                        Icon(
+                                            Icons.Rounded.Folder,
+                                            contentDescription = null,
+                                            tint = MaterialTheme.colorScheme.onSurfaceVariant,
+                                            modifier = Modifier.size(22.dp)
+                                        )
+                                    }
+                                }
+                            }
 
-                        Column(modifier = Modifier.weight(1f)) {
-                            Text(
-                                text = album.name,
-                                fontSize = 15.sp,
-                                fontWeight = FontWeight.SemiBold,
-                                color = MaterialTheme.colorScheme.onSurface
-                            )
-                            Text(
-                                text = "${album.count} 张照片",
-                                fontSize = 12.sp,
-                                color = MaterialTheme.colorScheme.onSurfaceVariant
-                            )
+                            Spacer(modifier = Modifier.width(13.dp))
+
+                            Column(modifier = Modifier.weight(1f)) {
+                                Text(
+                                    text = album.name,
+                                    fontSize = 15.sp,
+                                    fontWeight = FontWeight.SemiBold,
+                                    color = MaterialTheme.colorScheme.onSurface,
+                                    maxLines = 1,
+                                    overflow = TextOverflow.Ellipsis
+                                )
+                                Spacer(modifier = Modifier.height(1.dp))
+                                Text(
+                                    text = "${album.count} 张照片",
+                                    fontSize = 12.sp,
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                                )
+                            }
+
+                            if (isSelected) {
+                                Spacer(modifier = Modifier.width(8.dp))
+                                Icon(
+                                    imageVector = Icons.Rounded.Check,
+                                    contentDescription = "已选择",
+                                    tint = MaterialTheme.colorScheme.onSurface,
+                                    modifier = Modifier.size(18.dp)
+                                )
+                            }
                         }
                     }
                 }
             }
-
-            Spacer(modifier = Modifier.height(16.dp))
         }
-    }
-
-    if (showCreateDialog) {
-        AlertDialog(
-            onDismissRequest = { showCreateDialog = false },
-            title = { Text("新建专清图集") },
-            text = {
-                OutlinedTextField(
-                    value = newAlbumName,
-                    onValueChange = { newAlbumName = it },
-                    label = { Text("图集名称") },
-                    singleLine = true,
-                    modifier = Modifier.fillMaxWidth()
-                )
-            },
-            confirmButton = {
-                Button(
-                    onClick = {
-                        val name = newAlbumName.trim()
-                        if (name.isNotEmpty()) {
-                            showCreateDialog = false
-                            onSelectAlbum(name)
-                        }
-                    },
-                    colors = ButtonDefaults.buttonColors(containerColor = MaterialTheme.colorScheme.primary)
-                ) {
-                    Text("创建并专清")
-                }
-            },
-            dismissButton = {
-                TextButton(onClick = { showCreateDialog = false }) {
-                    Text("取消")
-                }
-            }
-        )
     }
 }
